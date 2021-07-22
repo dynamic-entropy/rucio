@@ -39,7 +39,7 @@ rucio-admin rse add XRD3
 rucio-admin rse add XRD4
 
 # Add the protocol definitions for the storage servers
-rucio-admin rse add-protocol --hostname xrd1 --scheme root --prefix //rucio --port 1094 --impl rucio.rse.protocols.xrootd.Default --domain-json '{"wan": {"read": 1, "write": 1, "delete": 1, "third_party_copy": 1}, "lan": {"read": 1, "write": 1, "delete": 1}}' XRD1
+rucio-admin rse add-protocol --hostname xrd1 --scheme https --prefix //rucio --port 1094 --impl rucio.rse.protocols.webdav.Default --domain-json '{"wan": {"read": 1, "write": 1, "delete": 1, "third_party_copy": 1}, "lan": {"read": 1, "write": 1, "delete": 1}}' XRD1
 rucio-admin rse add-protocol --hostname xrd2 --scheme root --prefix //rucio --port 1095 --impl rucio.rse.protocols.xrootd.Default --domain-json '{"wan": {"read": 1, "write": 1, "delete": 1, "third_party_copy": 1}, "lan": {"read": 1, "write": 1, "delete": 1}}' XRD2
 rucio-admin rse add-protocol --hostname xrd3 --scheme root --prefix //rucio --port 1096 --impl rucio.rse.protocols.xrootd.Default --domain-json '{"wan": {"read": 1, "write": 1, "delete": 1, "third_party_copy": 1}, "lan": {"read": 1, "write": 1, "delete": 1}}' XRD3
 rucio-admin rse add-protocol --hostname xrd4 --scheme root --prefix //rucio --port 1097 --impl rucio.rse.protocols.xrootd.Default --domain-json '{"wan": {"read": 1, "write": 1, "delete": 1, "third_party_copy": 1}, "lan": {"read": 1, "write": 1, "delete": 1}}' XRD4
@@ -51,7 +51,7 @@ rucio-admin rse set-attribute --rse XRD3 --key test_container_xrd --value True
 rucio-admin rse set-attribute --rse XRD4 --key test_container_xrd --value True
 
 # Workaround, xrootd.py#connect returns with Auth Failed due to execution of the command in subprocess
-XrdSecPROTOCOL=gsi XRD_REQUESTTIMEOUT=10 xrdfs xrd1:1094 query config xrd1:1094
+# XrdSecPROTOCOL=gsi XRD_REQUESTTIMEOUT=10 xrdfs xrd1:1094 query config xrd1:1094
 XrdSecPROTOCOL=gsi XRD_REQUESTTIMEOUT=10 xrdfs xrd2:1095 query config xrd2:1095
 XrdSecPROTOCOL=gsi XRD_REQUESTTIMEOUT=10 xrdfs xrd3:1096 query config xrd3:1096
 XrdSecPROTOCOL=gsi XRD_REQUESTTIMEOUT=10 xrdfs xrd3:1096 query config xrd4:1097

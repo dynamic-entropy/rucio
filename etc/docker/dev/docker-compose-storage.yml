@@ -17,7 +17,7 @@ services:
       - "8080:80"
       - "8446:8446"
       - "8449:8449"
-      - "3306:3306"
+      - "3307:3306"
       - "1094:1094"
       - "1095:1095"
       - "1096:1096"
@@ -38,7 +38,15 @@ services:
       - POSTGRES_USER=rucio
       - POSTGRES_DB=rucio
       - POSTGRES_PASSWORD=secret
-    command: ["-c", "fsync=off","-c", "synchronous_commit=off","-c", "full_page_writes=off"]
+    command:
+      [
+        "-c",
+        "fsync=off",
+        "-c",
+        "synchronous_commit=off",
+        "-c",
+        "full_page_writes=off",
+      ]
   graphite:
     image: docker.io/graphiteapp/graphite-statsd
     network_mode: "service:rucio"

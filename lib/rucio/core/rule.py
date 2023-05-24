@@ -17,7 +17,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from configparser import NoOptionError
+from configparser import NoOptionError, NoSectionError
 
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -51,7 +51,7 @@ from rucio.common.exception import (InvalidRSEExpression, InvalidReplicationRule
                                     InvalidSourceReplicaExpression)
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalScope, InternalAccount
-from rucio.common.utils import str_to_date, sizefmt, chunks
+from rucio.common.utils import str_to_date, sizefmt, chunks, register_policy_package_algorithms
 from rucio.core import account_counter, rse_counter, request as request_core, transfer as transfer_core
 from rucio.core.account import get_account
 from rucio.core.lifetime_exception import define_eol
@@ -254,28 +254,69 @@ def add_rule(dids, account, copies, rse_expression, grouping, weight, lifetime, 
 
             if ask_approval:
                 new_rule.state = RuleState.WAITING_APPROVAL
-                # Block manual approval for multi-rse rules
-                if len(rses) > 1:
-                    raise InvalidReplicationRule('Ask approval is not allowed for rules with multiple RSEs')
-                if len(rses) == 1 and not did.is_open and did.bytes is not None and did.length is not None:
-                    # This rule can be considered for auto-approval:
-                    rse_attr = list_rse_attributes(rse_id=rses[0]['id'], session=session)
-                    auto_approve = False
-                    if 'auto_approve_bytes' in rse_attr and 'auto_approve_files' in rse_attr:
-                        if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_bytes')):
+                configured_algorithm, auto_approve = None, False
+                algorithm_used, auto_approve_algorithm_fn = None, None
+
+                try:
+                    configured_algorithm = config_get('rules', 'auto_approve_algorithm')
+                except (NoOptionError, NoSectionError, RuntimeError):
+                    auto_approve_algorithm_fn = None
+
+                try:
+                    AUTO_APPROVE_ALGORITHMS = {}
+                    register_policy_package_algorithms('auto_approve', AUTO_APPROVE_ALGORITHMS)
+                    auto_approve_algorithm_fn = AUTO_APPROVE_ALGORITHMS[configured_algorithm]
+                except KeyError:
+                    logger(logging.WARNING, "Auto approve algorithm %s not found in policy package", configured_algorithm)
+
+                # Evaluate the rule with the auto-approve algorithm
+                if auto_approve_algorithm_fn:
+                    rule_attributes = {
+                        'account': account,
+                        'lifetime': lifetime,
+                        'rse_expression': rse_expression,
+                        'copies': copies,
+                        'weight': weight,
+                        'grouping': grouping,
+                        'locked': locked,
+                        'comment': comment,
+                        'meta': meta,
+                        'ignore_availability': ignore_availability,
+                    }
+
+                    if auto_approve_algorithm_fn(did, rule_attributes, session):
+                        auto_approve = True
+                        algorithm_used = configured_algorithm
+
+                # Try the legacy one if not yet auto-approved
+                if not auto_approve:
+                    # Block manual approval for multi-rse rules
+                    if len(rses) > 1:
+                        raise InvalidReplicationRule('Ask approval is not allowed for rules with multiple RSEs')
+                    if len(rses) == 1 and not did.is_open and did.bytes is not None and did.length is not None:
+                        # This rule can be considered for auto-approval:
+                        rse_attr = list_rse_attributes(rse_id=rses[0]['id'], session=session)
+                        auto_approve = False
+                        if 'auto_approve_bytes' in rse_attr and 'auto_approve_files' in rse_attr:
+                            if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_bytes')):
+                                auto_approve = True
+                                algorithm_used = 'legacy'
+                        elif did.bytes < int(rse_attr.get('auto_approve_bytes', -1)):
                             auto_approve = True
-                    elif did.bytes < int(rse_attr.get('auto_approve_bytes', -1)):
-                        auto_approve = True
-                    elif did.length < int(rse_attr.get('auto_approve_files', -1)):
-                        auto_approve = True
-                    if auto_approve:
-                        logger(logging.DEBUG, "Auto approving rule %s", str(new_rule.id))
-                        logger(logging.DEBUG, "Created rule %s for injection", str(new_rule.id))
-                        approve_rule(rule_id=new_rule.id, notify_approvers=False, session=session)
-                        continue
-                logger(logging.DEBUG, "Created rule %s in waiting for approval", str(new_rule.id))
-                __create_rule_approval_email(rule=new_rule, session=session)
-                continue
+                            algorithm_used = 'legacy'
+                        elif did.length < int(rse_attr.get('auto_approve_files', -1)):
+                            auto_approve = True
+                            algorithm_used = 'legacy'
+
+                if auto_approve:
+                    logger(logging.DEBUG, "Auto approving rule %s; Algorithm used for approval: %s", str(new_rule.id), algorithm_used)
+                    logger(logging.DEBUG, "Created rule %s for injection", str(new_rule.id))
+                    approve_rule(rule_id=new_rule.id, notify_approvers=False, session=session)
+                    continue
+                else:
+                    logger(logging.DEBUG, "Created rule %s in waiting for approval", str(new_rule.id))
+                    __create_rule_approval_email(rule=new_rule, session=session)
+                    continue
 
             # Force ASYNC mode for large rules
             if did.length is not None and (did.length * copies) >= 10000:

@@ -1754,6 +1754,22 @@ class PriorityQueue:
         return heap_changed
 
 
+def get_auto_approve_algorithms():
+    '''
+    Loads all the auto approve algorithms from the policy package(s)
+    :returns: a dictionary of auto approve algorithms
+    '''
+    global _loaded_auto_approve_algorithms
+    if not _loaded_auto_approve_algorithms:
+        register_policy_package_algorithms('auto_approve', _AUTO_APPROVE_ALGORITHMS)
+
+    return _AUTO_APPROVE_ALGORITHMS
+
+
+_AUTO_APPROVE_ALGORITHMS = {}
+_loaded_auto_approve_algorithms = False
+
+
 def register_policy_package_algorithms(algorithm_type, dictionary):
     '''
     Loads all the algorithms of a given type from the policy package(s) and registers them

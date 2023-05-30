@@ -298,7 +298,7 @@ def add_rule(dids, account, copies, rse_expression, grouping, weight, lifetime, 
                         rse_attr = list_rse_attributes(rse_id=rses[0]['id'], session=session)
                         auto_approve = False
                         if 'auto_approve_bytes' in rse_attr and 'auto_approve_files' in rse_attr:
-                            if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_bytes')):
+                            if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_files')):
                                 auto_approve = True
                                 algorithm_used = 'legacy'
                         elif did.bytes < int(rse_attr.get('auto_approve_bytes', -1)):

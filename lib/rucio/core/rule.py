@@ -51,7 +51,7 @@ from rucio.common.exception import (InvalidRSEExpression, InvalidReplicationRule
                                     InvalidSourceReplicaExpression)
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalScope, InternalAccount
-from rucio.common.utils import str_to_date, sizefmt, chunks, get_auto_approve_algorithms
+from rucio.common.utils import str_to_date, sizefmt, chunks, register_policy_package_algorithms
 from rucio.core import account_counter, rse_counter, request as request_core, transfer as transfer_core
 from rucio.core.account import get_account
 from rucio.core.lifetime_exception import define_eol
@@ -74,6 +74,92 @@ if TYPE_CHECKING:
 
 REGION = make_region_memcached(expiration_time=900)
 METRICS = MetricManager(module=__name__)
+
+
+class AutoApprover():
+    '''
+    Handle automatic approval algorithms for replication rules
+    '''
+    _AUTO_APPROVE_ALGORITHMS = {}
+    _loaded_auto_approve_algorithms = False
+
+    def __init__(self, did, rses, account, lifetime, rse_expression, activity, copies, weight, grouping, locked, comment, meta, ignore_availability, session=None):
+        self.rule_attributes = {
+            'account': account,
+            'lifetime': lifetime,
+            'rse_expression': rse_expression,
+            'activity': activity,
+            'copies': copies,
+            'weight': weight,
+            'grouping': grouping,
+            'locked': locked,
+            'comment': comment,
+            'meta': meta,
+            'ignore_availability': ignore_availability,
+        }
+        self.did = did
+        self.rses = rses
+        self.session = session
+        self.auto_approve_algorithm = AutoApprover.get_configured_algorithm()
+
+    @staticmethod
+    def register(function, name):
+        '''
+        Register an auto-approve algorithm
+        '''
+        if name is None:
+            name = function.__name__
+        AutoApprover._AUTO_APPROVE_ALGORITHMS[name] = function
+
+    @classmethod
+    def get_configured_algorithm(cls):
+        """
+        Get the configured auto-approve algorithm
+        """
+
+        if not cls._loaded_auto_approve_algorithms:
+            cls.register(cls.default, 'default')
+            policy_auto_approve_algorithms = {}
+            register_policy_package_algorithms('auto_approve', policy_auto_approve_algorithms)
+            for algo_name, algo_callable in policy_auto_approve_algorithms.items():
+                cls.register(algo_callable, algo_name)
+                cls._loaded_auto_approve_algorithms = True
+
+        try:
+            configured_algorithm = config_get('rules', 'auto_approve_algorithm')
+        except (NoOptionError, NoSectionError, RuntimeError):
+            configured_algorithm = 'default'
+
+        return cls._AUTO_APPROVE_ALGORITHMS[configured_algorithm]
+
+    @staticmethod
+    def default(did, rses, rule_attributes, session=None):
+        '''
+        Default auto-approve algorithm
+        '''
+        auto_approve = False
+        # Block manual approval for multi-rse rules
+        if len(rses) > 1:
+            raise InvalidReplicationRule('Ask approval is not allowed for rules with multiple RSEs')
+        if len(rses) == 1 and not did.is_open and did.bytes is not None and did.length is not None:
+            # This rule can be considered for auto-approval:
+            rse_attr = list_rse_attributes(rse_id=rses[0]['id'], session=session)
+            auto_approve = False
+            if 'auto_approve_bytes' in rse_attr and 'auto_approve_files' in rse_attr:
+                if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_files')):
+                    auto_approve = True
+            elif did.bytes < int(rse_attr.get('auto_approve_bytes', -1)):
+                auto_approve = True
+            elif did.length < int(rse_attr.get('auto_approve_files', -1)):
+                auto_approve = True
+
+        return auto_approve
+
+    def evaluate_auto_approve(self):
+        """
+        Evaluate the auto-approve algorithm for a given rule and list of RSEs
+        """
+        return self.auto_approve_algorithm(self.did, self.rses, self.rule_attributes, session=self.session)
 
 
 @transactional_session
@@ -254,65 +340,16 @@ def add_rule(dids, account, copies, rse_expression, grouping, weight, lifetime, 
 
             if ask_approval:
                 new_rule.state = RuleState.WAITING_APPROVAL
-                configured_algorithm, auto_approve = None, False
-                auto_approve_callable = None
-
-                try:
-                    configured_algorithm = config_get('rules', 'auto_approve_algorithm')
-                except (NoOptionError, NoSectionError, RuntimeError):
-                    configured_algorithm = None
-
-                try:
-                    AUTO_APPROVE_ALGORITHMS = get_auto_approve_algorithms()
-                    auto_approve_callable = AUTO_APPROVE_ALGORITHMS[configured_algorithm]
-                except KeyError:
-                    logger(logging.WARNING, "Auto approve algorithm %s not found in policy package", configured_algorithm)
-
-                # Evaluate the rule with the auto-approve algorithm
-                if auto_approve_callable:
-                    rule_attributes = {
-                        'account': account,
-                        'lifetime': lifetime,
-                        'rse_expression': rse_expression,
-                        'activity': activity,
-                        'copies': copies,
-                        'weight': weight,
-                        'grouping': grouping,
-                        'locked': locked,
-                        'comment': comment,
-                        'meta': meta,
-                        'ignore_availability': ignore_availability,
-                    }
-
-                    if auto_approve_callable(did, rule_attributes, session):
-                        auto_approve = True
-
-                # Try the legacy one if not yet auto-approved
-                else:
-                    # Block manual approval for multi-rse rules
-                    if len(rses) > 1:
-                        raise InvalidReplicationRule('Ask approval is not allowed for rules with multiple RSEs')
-                    if len(rses) == 1 and not did.is_open and did.bytes is not None and did.length is not None:
-                        # This rule can be considered for auto-approval:
-                        rse_attr = list_rse_attributes(rse_id=rses[0]['id'], session=session)
-                        auto_approve = False
-                        if 'auto_approve_bytes' in rse_attr and 'auto_approve_files' in rse_attr:
-                            if did.bytes < int(rse_attr.get('auto_approve_bytes')) and did.length < int(rse_attr.get('auto_approve_files')):
-                                auto_approve = True
-                        elif did.bytes < int(rse_attr.get('auto_approve_bytes', -1)):
-                            auto_approve = True
-                        elif did.length < int(rse_attr.get('auto_approve_files', -1)):
-                            auto_approve = True
-
-                if auto_approve:
-                    logger(logging.DEBUG, "Auto approving rule %s; Algorithm used for approval: %s", str(new_rule.id), configured_algorithm or 'default')
+                auto_approver = AutoApprover(did, rses, account, lifetime, rse_expression, activity, copies, weight, grouping, locked, comment, meta, ignore_availability, session)
+                if auto_approver.evaluate_auto_approve():
+                    logger(logging.DEBUG, "Auto approving rule %s; Algorithm used for approval: %s", str(new_rule.id), auto_approver.auto_approve_algorithm.__name__)
                     logger(logging.DEBUG, "Created rule %s for injection", str(new_rule.id))
                     approve_rule(rule_id=new_rule.id, notify_approvers=False, session=session)
                     continue
-                else:
-                    logger(logging.DEBUG, "Created rule %s in waiting for approval", str(new_rule.id))
-                    __create_rule_approval_email(rule=new_rule, session=session)
-                    continue
+
+                logger(logging.DEBUG, "Created rule %s in waiting for approval", str(new_rule.id))
+                __create_rule_approval_email(rule=new_rule, session=session)
+                continue
 
             # Force ASYNC mode for large rules
             if did.length is not None and (did.length * copies) >= 10000:

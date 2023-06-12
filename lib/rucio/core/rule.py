@@ -120,7 +120,7 @@ class AutoApprover():
     _loaded_auto_approve_algorithms: bool = False
 
     def __init__(self, did: models.DataIdentifier, rses: List[Dict[str, Any]], account: str, lifetime: int, rse_expression: str, activity: str, copies: int, weight: int,
-                 grouping: RuleGrouping, locked: bool, comment: str, meta: str, ignore_availability: bool, session: "Session") -> None:
+                 grouping: RuleGrouping, locked: bool, comment: Optional[str], meta: Optional[str], ignore_availability: bool, session: "Session") -> None:
         self.rule_attributes: Dict[str, Any] = {
             'account': account,
             'lifetime': lifetime,

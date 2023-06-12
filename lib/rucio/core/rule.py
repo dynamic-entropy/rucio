@@ -23,7 +23,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from re import match
 from string import Template
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from os import path
 
 from dogpile.cache.api import NO_VALUE
@@ -69,7 +69,6 @@ from rucio.db.sqla.session import read_session, transactional_session, stream_se
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
-    from typing import List, Tuple
 
 
 REGION = make_region_memcached(expiration_time=900)
@@ -120,8 +119,8 @@ class AutoApprover():
     _AUTO_APPROVE_ALGORITHMS: Dict[str, Callable[[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], 'Session'], bool]] = {}
     _loaded_auto_approve_algorithms: bool = False
 
-    def __init__(self, did: Dict[str, Any], rses: List[Dict[str, Any]], account: str, lifetime: int, rse_expression: str, activity: str, copies: int, weight: int,
-                 grouping: str, locked: bool, comment: str, meta: str, ignore_availability: bool, session: "Session") -> None:
+    def __init__(self, did: models.DataIdentifier, rses: List[Dict[str, Any]], account: str, lifetime: int, rse_expression: str, activity: str, copies: int, weight: int,
+                 grouping: RuleGrouping, locked: bool, comment: str, meta: str, ignore_availability: bool, session: "Session") -> None:
         self.rule_attributes: Dict[str, Any] = {
             'account': account,
             'lifetime': lifetime,
@@ -171,7 +170,7 @@ class AutoApprover():
         return cls._AUTO_APPROVE_ALGORITHMS[configured_algorithm]
 
     @staticmethod
-    def default(did: Dict[str, Any], rses: List[Dict[str, Any]], rule_attributes: Dict[str, Any], session: Optional["Session"] = None):
+    def default(did: models.DataIdentifier, rses: List[Dict[str, Any]], rule_attributes: Dict[str, Any], session: Optional["Session"] = None):
         """
         Default auto-approve algorithm
         """

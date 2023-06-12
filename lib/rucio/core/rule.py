@@ -23,7 +23,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from re import match
 from string import Template
-from typing import Dict, Any, Optional
+from typing import Any, Callable, Dict, Optional
 from os import path
 
 from dogpile.cache.api import NO_VALUE
@@ -77,14 +77,52 @@ METRICS = MetricManager(module=__name__)
 
 
 class AutoApprover():
-    '''
+    """
     Handle automatic approval algorithms for replication rules
-    '''
-    _AUTO_APPROVE_ALGORITHMS = {}
-    _loaded_auto_approve_algorithms = False
 
-    def __init__(self, did, rses, account, lifetime, rse_expression, activity, copies, weight, grouping, locked, comment, meta, ignore_availability, session=None):
-        self.rule_attributes = {
+    A AUTO_APPROVE_ALGORITHM is a function that takes the following arguments:
+    :param did: The DID being approved
+    :type did dict: {
+        'scope': 'cms|user.username|group.groupname',
+        'name': 'lfn',
+        'account': 'account which registered the DID',
+        'did_type': 'FILE, DATASET, CONTAINER',
+        'is_open': 'True | False',
+        'bytes': 'size in bytes (NULL for a CONTAINER)',
+        }
+
+    :param rses: The evauated list of RSE Expression
+    :type rses list: [{
+        'rse_id': 'The RSE id',
+        'rse': 'The RSE name',
+        'rse_type': 'disk|tape',
+        ...other RSE attributes
+        }]
+
+    :param rule_attributes: The attributes of the rule being approved
+    :type rule_attributes dict: {
+        'account': account,
+        'lifetime': lifetime,
+        'rse_expression': rse_expression,
+        activity': activity,
+        'copies': copies,
+        'weight': weight,
+        'grouping': grouping,
+        'locked': locked,
+        'comment': comment,
+        'meta': meta,
+        'ignore_availability': ignore_availability,
+        }
+    :param session: The database session in use
+
+    :returns: True if the rule should be auto approved, False otherwise
+    """
+    _AUTO_APPROVE_ALGORITHMS: Dict[str, Callable[[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], 'Session'], bool]] = {}
+    _loaded_auto_approve_algorithms: bool = False
+
+    def __init__(self, did: Dict[str, Any], rses: List[Dict[str, Any]], account: str, lifetime: int, rse_expression: str, activity: str, copies: int, weight: int,
+                 grouping: str, locked: bool, comment: str, meta: str, ignore_availability: bool, session: "Session") -> None:
+        self.rule_attributes: Dict[str, Any] = {
             'account': account,
             'lifetime': lifetime,
             'rse_expression': rse_expression,
@@ -103,40 +141,41 @@ class AutoApprover():
         self.auto_approve_algorithm = AutoApprover.get_configured_algorithm()
 
     @staticmethod
-    def register(function, name):
-        '''
+    def register(function: Callable[..., bool], name: Optional[str] = None) -> None:
+        """
         Register an auto-approve algorithm
-        '''
+        """
         if name is None:
             name = function.__name__
         AutoApprover._AUTO_APPROVE_ALGORITHMS[name] = function
 
     @classmethod
-    def get_configured_algorithm(cls):
+    def get_configured_algorithm(cls) -> Callable[[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], 'Session'], bool]:
         """
         Get the configured auto-approve algorithm
         """
 
         if not cls._loaded_auto_approve_algorithms:
             cls.register(cls.default, 'default')
-            policy_auto_approve_algorithms = {}
+            policy_auto_approve_algorithms: Dict[str, Callable[[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], 'Session'], bool]] = {}
             register_policy_package_algorithms('auto_approve', policy_auto_approve_algorithms)
             for algo_name, algo_callable in policy_auto_approve_algorithms.items():
                 cls.register(algo_callable, algo_name)
                 cls._loaded_auto_approve_algorithms = True
 
         try:
-            configured_algorithm = config_get('rules', 'auto_approve_algorithm')
+            configured_algorithm: str = str(config_get('rules', 'auto_approve_algorithm', default='default'))
         except (NoOptionError, NoSectionError, RuntimeError):
             configured_algorithm = 'default'
 
         return cls._AUTO_APPROVE_ALGORITHMS[configured_algorithm]
 
     @staticmethod
-    def default(did, rses, rule_attributes, session=None):
-        '''
+    def default(did: Dict[str, Any], rses: List[Dict[str, Any]], rule_attributes: Dict[str, Any], session: Optional["Session"] = None):
+        """
         Default auto-approve algorithm
-        '''
+        """
+
         auto_approve = False
         # Block manual approval for multi-rse rules
         if len(rses) > 1:
@@ -155,11 +194,11 @@ class AutoApprover():
 
         return auto_approve
 
-    def evaluate_auto_approve(self):
+    def evaluate_auto_approve(self) -> bool:
         """
         Evaluate the auto-approve algorithm for a given rule and list of RSEs
         """
-        return self.auto_approve_algorithm(self.did, self.rses, self.rule_attributes, session=self.session)
+        return self.auto_approve_algorithm(self.did, self.rses, self.rule_attributes, self.session)
 
 
 @transactional_session

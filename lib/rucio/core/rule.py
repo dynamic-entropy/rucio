@@ -170,7 +170,7 @@ class AutoApprover():
         return cls._AUTO_APPROVE_ALGORITHMS[configured_algorithm]
 
     @staticmethod
-    def default(did: models.DataIdentifier, rses: List[Dict[str, Any]], rule_attributes: Dict[str, Any], session: Optional["Session"] = None):
+    def default(did: models.DataIdentifier, rses: List[Dict[str, Any]], rule_attributes: Dict[str, Any], session: Optional["Session"] = None) -> bool:
         """
         Default auto-approve algorithm
         """

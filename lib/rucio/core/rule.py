@@ -23,7 +23,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from re import match
 from string import Template
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 from os import path
 
 from dogpile.cache.api import NO_VALUE
@@ -76,6 +76,9 @@ REGION = make_region_memcached(expiration_time=900)
 METRICS = MetricManager(module=__name__)
 
 
+TAutoApprove = TypeVar('TAutoApprove', bound='AutoApprove')
+
+
 class AutoApprove(PolicyPackageAlgorithms):
     """
     Handle automatic approval algorithms for replication rules
@@ -83,7 +86,7 @@ class AutoApprove(PolicyPackageAlgorithms):
 
     _algorithm_type = 'auto_approve'
 
-    def __init__(self, rule: models.ReplicationRule, did: models.DataIdentifier, session: 'Session'):
+    def __init__(self, rule: models.ReplicationRule, did: models.DataIdentifier, session: 'Session') -> None:
         super().__init__()
         self.rule = rule
         self.did = did
@@ -97,7 +100,7 @@ class AutoApprove(PolicyPackageAlgorithms):
         return self.get_configured_algorithm()(self.rule, self.did, self.session)
 
     @classmethod
-    def get_configured_algorithm(cls) -> Callable[[models.ReplicationRule, models.DataIdentifier, 'Session'], bool]:
+    def get_configured_algorithm(cls: Type[TAutoApprove]) -> Callable[[models.ReplicationRule, models.DataIdentifier, 'Session'], bool]:
         """
         Get the configured auto-approve algorithm
         """
@@ -109,7 +112,7 @@ class AutoApprove(PolicyPackageAlgorithms):
         return super()._get_one_algorithm(cls._algorithm_type, configured_algorithm)
 
     @classmethod
-    def register(cls, name: str, fn_auto_approve: Callable[[models.ReplicationRule, models.DataIdentifier, 'Session'], bool]):
+    def register(cls: Type[TAutoApprove], name: str, fn_auto_approve: Callable[[models.ReplicationRule, models.DataIdentifier, 'Session'], bool]) -> None:
         """
         Register a new auto-approve algorithm
         """

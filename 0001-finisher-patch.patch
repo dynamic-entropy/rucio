@@ -1,0 +1,214 @@
+From c33392127c39dd245c6470d969a4c010115f974e Mon Sep 17 00:00:00 2001
+From: rchauhan <omrahulchauhan@gmail.com>
+Date: Tue, 18 Jul 2023 01:14:28 +0200
+Subject: [PATCH] finisher-patch
+
+---
+ lib/rucio/common/logging.py            |  2 +-
+ lib/rucio/core/request.py              | 61 ++++++++++++++------------
+ lib/rucio/daemons/conveyor/finisher.py | 25 +++++------
+ 3 files changed, 46 insertions(+), 42 deletions(-)
+
+diff --git a/lib/rucio/common/logging.py b/lib/rucio/common/logging.py
+index 610eb2a60..9697d48b1 100644
+--- a/lib/rucio/common/logging.py
++++ b/lib/rucio/common/logging.py
+@@ -358,7 +358,7 @@ def setup_logging(application=None):
+
+     stdouthandler = logging.StreamHandler(stream=sys.stdout)
+     stdouthandler.setFormatter(rucio_log_formatter())
+-    stdouthandler.setLevel(config_loglevel)
++    stdouthandler.setLevel(logging.DEBUG)
+     logging.basicConfig(level=config_loglevel, handlers=[stdouthandler])
+
+     if application:
+diff --git a/lib/rucio/core/request.py b/lib/rucio/core/request.py
+index be07c9abe..1c9b67645 100644
+--- a/lib/rucio/core/request.py
++++ b/lib/rucio/core/request.py
+@@ -215,7 +215,7 @@ def queue_requests(requests, *, session: "Session", logger=logging.log):
+     :param logger:    Optional decorated logger that can be passed from the calling daemons or servers.
+     :returns:         List of Request-IDs as 32 character hex strings.
+     """
+-    logger(logging.DEBUG, "queue requests")
++    logger(logging.INFO, "queue requests")
+
+     request_clause = []
+     rses = {}
+@@ -626,6 +626,7 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
+     if not activity_shares:
+         activity_shares = [None]
+
++    print("Share of requests to be processed: %s" % activity_shares)
+     for share in activity_shares:
+
+         query = select(
+@@ -647,36 +648,39 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
+                 models.Request, "INDEX(REQUESTS REQUESTS_TYP_STA_UPD_IDX)", 'oracle'
+             )
+
+-        if not include_dependent:
+-            # filter out transfers which depend on some other "previous hop" requests.
+-            # In particular, this is used to avoid multiple finishers trying to archive different
+-            # transfers from the same path and thus having concurrent deletion of same rows from
+-            # the transfer_hop table.
+-            query = query.outerjoin(
+-                models.TransferHop,
+-                models.TransferHop.next_hop_request_id == models.Request.id
+-            ).where(
+-                models.TransferHop.next_hop_request_id == null()
+-            )
+-
+-        if isinstance(older_than, datetime.datetime):
+-            query = query.filter(models.Request.updated_at < older_than)
+-
+-        if rse_id:
+-            query = query.filter(models.Request.dest_rse_id == rse_id)
+-
+-        if share:
+-            query = query.filter(models.Request.activity == share)
+-        elif activity:
+-            query = query.filter(models.Request.activity == activity)
+-
+-        query = filter_thread_work(session=session, query=query, total_threads=total_workers, thread_id=worker_number, hash_variable=hash_variable)
++        query = query.filter(models.Request.rule_id == '2476E77F52324CC6AEEBA99D31F0DE8E'.lower())
++        query = query.with_for_update(skip_locked=True)
++        # if not include_dependent:
++        #     # filter out transfers which depend on some other "previous hop" requests.
++        #     # In particular, this is used to avoid multiple finishers trying to archive different
++        #     # transfers from the same path and thus having concurrent deletion of same rows from
++        #     # the transfer_hop table.
++        #     query = query.outerjoin(
++        #         models.TransferHop,
++        #         models.TransferHop.next_hop_request_id == models.Request.id
++        #     ).where(
++        #         models.TransferHop.next_hop_request_id == null()
++        #     )
++
++        # if isinstance(older_than, datetime.datetime):
++        #     query = query.filter(models.Request.updated_at < older_than)
++
++        # if rse_id:
++        #     query = query.filter(models.Request.dest_rse_id == rse_id)
++
++        # if share:
++        #     query = query.filter(models.Request.activity == share)
++        # elif activity:
++        #     query = query.filter(models.Request.activity == activity)
++
++        # query = filter_thread_work(session=session, query=query, total_threads=total_workers, thread_id=worker_number, hash_variable=hash_variable)
+
+         if share:
+             query = query.limit(activity_shares[share])
+         else:
+             query = query.limit(limit)
+
++        print("Query: %s" % query)
+         query_result = session.execute(query).scalars()
+         if query_result:
+             if mode_all:
+@@ -695,6 +699,7 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
+                 for res in query_result:
+                     result.append({'request_id': res.id, 'external_host': res.external_host, 'external_id': res.external_id})
+
++    print("Number of requests to be processed: %s" % len(result))
+     return result
+
+
+@@ -1914,11 +1919,11 @@ def update_requests_priority(priority, filter_, *, session: "Session", logger=lo
+                     }
+                 )
+                 session.execute(stmt)
+-                logger(logging.DEBUG, "Updated request %s priority to %s in rucio." % (item.id, priority))
++                logger(logging.INFO, "Updated request %s priority to %s in rucio." % (item.id, priority))
+                 if item.request_state == RequestState.SUBMITTED and item.lock_state == LockState.REPLICATING:
+                     transfers_to_update.setdefault(item.external_host, {})[item.external_id] = priority
+             except Exception:
+-                logger(logging.DEBUG, "Failed to boost request %s priority: %s" % (item.id, traceback.format_exc()))
++                logger(logging.INFO, "Failed to boost request %s priority: %s" % (item.id, traceback.format_exc()))
+         return transfers_to_update
+     except IntegrityError as error:
+         raise RucioException(error.args)
+@@ -2133,7 +2138,7 @@ def get_source_rse(request_id, src_url, *, session: "Session", logger=logging.lo
+             if source['url'] == src_url:
+                 src_rse_id = source['rse_id']
+                 src_rse_name = get_rse_name(src_rse_id, session=session)
+-                logger(logging.DEBUG, "Find rse name %s for %s" % (src_rse_name, src_url))
++                logger(logging.INFO, "Find rse name %s for %s" % (src_rse_name, src_url))
+                 return src_rse_name, src_rse_id
+         # cannot find matched surl
+         logger(logging.WARNING, 'Cannot get correct RSE for source url: %s' % (src_url))
+diff --git a/lib/rucio/daemons/conveyor/finisher.py b/lib/rucio/daemons/conveyor/finisher.py
+index 7ef383c84..0058e160b 100644
+--- a/lib/rucio/daemons/conveyor/finisher.py
++++ b/lib/rucio/daemons/conveyor/finisher.py
+@@ -60,23 +60,22 @@ def run_once(bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches, hear
+     worker_number, total_workers, logger = heartbeat_handler.live()
+
+     try:
+-        logger(logging.DEBUG, 'Working on activity %s', activity)
+-
++        logger(logging.INFO, 'Working on activity %s', activity)
++        logger(logging.INFO, 'Starting run with bulk=%s, db_bulk=%s, suspicious_patterns=%s, retry_protocol_mismatches=%s', bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches)
+         reqs = request_core.get_next(request_type=[RequestType.TRANSFER, RequestType.STAGEIN, RequestType.STAGEOUT],
+-                                     state=[RequestState.DONE, RequestState.FAILED,
+-                                            RequestState.LOST, RequestState.SUBMITTING,
+-                                            RequestState.SUBMISSION_FAILED, RequestState.NO_SOURCES,
+-                                            RequestState.ONLY_TAPE_SOURCES, RequestState.MISMATCH_SCHEME],
++                                     state=[RequestState.DONE, RequestState.FAILED],
+                                      limit=db_bulk,
+                                      older_than=datetime.datetime.utcnow(),
+                                      total_workers=total_workers,
+                                      worker_number=worker_number,
+                                      mode_all=True,
+-                                     include_dependent=False,
+-                                     hash_variable='rule_id')
++                                     rse_id='f44c866a264d4da9972969e9f3b5bb52',
++                                     include_dependent=True,
++                                     activity='User Subscriptions',
++                                     )
+
+         if reqs:
+-            logger(logging.DEBUG, 'Updating %i requests for activity %s', len(reqs), activity)
++            logger(logging.INFO, 'Updating %i requests for activity %s', len(reqs), activity)
+
+         total_stopwatch = Stopwatch()
+
+@@ -91,7 +90,7 @@ def run_once(bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches, hear
+                 logger(logging.WARNING, '%s', str(error))
+
+         if reqs:
+-            logger(logging.DEBUG, 'Finish to update %s finished requests for activity %s in %s seconds', len(reqs), activity, total_stopwatch.elapsed)
++            logger(logging.INFO, 'Finish to update %s finished requests for activity %s in %s seconds', len(reqs), activity, total_stopwatch.elapsed)
+
+     except (DatabaseException, DatabaseError) as error:
+         if re.match('.*ORA-00054.*', error.args[0]) or re.match('.*ORA-00060.*', error.args[0]) or 'ERROR 1205 (HY000)' in error.args[0]:
+@@ -117,7 +116,7 @@ def finisher(once=False, sleep_time=60, activities=None, bulk=100, db_bulk=1000,
+         pattern = str(suspicious_patterns)
+         patterns = pattern.split(",")
+         suspicious_patterns = [re.compile(pat.strip()) for pat in patterns]
+-    logging.log(logging.DEBUG, "Suspicious patterns: %s" % [pat.pattern for pat in suspicious_patterns])
++    logging.log(logging.INFO, "Suspicious patterns: %s" % [pat.pattern for pat in suspicious_patterns])
+
+     retry_protocol_mismatches = conveyor_config.get('retry_protocol_mismatches', False)
+
+@@ -315,7 +314,7 @@ def __check_suspicious_files(req, suspicious_patterns, logger=logging.log):
+         return is_suspicious
+
+     try:
+-        logger(logging.DEBUG, "Checking suspicious file for request: %s, transfer error: %s", req['request_id'], req['err_msg'])
++        logger(logging.INFO, "Checking suspicious file for request: %s, transfer error: %s", req['request_id'], req['err_msg'])
+         for pattern in suspicious_patterns:
+             if pattern.match(req['err_msg']):
+                 is_suspicious = True
+@@ -329,7 +328,7 @@ def __check_suspicious_files(req, suspicious_patterns, logger=logging.log):
+                 for url in urls:
+                     pfns.append(url['url'])
+                 if pfns:
+-                    logger(logging.DEBUG, "Found suspicious urls: %s", str(pfns))
++                    logger(logging.INFO, "Found suspicious urls: %s", str(pfns))
+                     replica_core.declare_bad_file_replicas(pfns, reason=reason, issuer=InternalAccount('root', vo=req['scope'].vo), status=BadFilesStatus.SUSPICIOUS)
+     except Exception as error:
+         logger(logging.WARNING, "Failed to check suspicious file with request: %s - %s", req['request_id'], str(error))
+--
+2.39.2

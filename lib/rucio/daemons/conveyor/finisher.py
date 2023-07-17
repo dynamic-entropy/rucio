@@ -60,23 +60,22 @@ def run_once(bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches, hear
     worker_number, total_workers, logger = heartbeat_handler.live()
 
     try:
-        logger(logging.DEBUG, 'Working on activity %s', activity)
-
+        logger(logging.INFO, 'Working on activity %s', activity)
+        logger(logging.INFO, 'Starting run with bulk=%s, db_bulk=%s, suspicious_patterns=%s, retry_protocol_mismatches=%s', bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches)
         reqs = request_core.get_next(request_type=[RequestType.TRANSFER, RequestType.STAGEIN, RequestType.STAGEOUT],
-                                     state=[RequestState.DONE, RequestState.FAILED,
-                                            RequestState.LOST, RequestState.SUBMITTING,
-                                            RequestState.SUBMISSION_FAILED, RequestState.NO_SOURCES,
-                                            RequestState.ONLY_TAPE_SOURCES, RequestState.MISMATCH_SCHEME],
+                                     state=[RequestState.DONE, RequestState.FAILED],
                                      limit=db_bulk,
                                      older_than=datetime.datetime.utcnow(),
                                      total_workers=total_workers,
                                      worker_number=worker_number,
                                      mode_all=True,
-                                     include_dependent=False,
-                                     hash_variable='rule_id')
+                                     rse_id='f44c866a264d4da9972969e9f3b5bb52',
+                                     include_dependent=True,
+                                     activity='User Subscriptions',
+                                     )
 
         if reqs:
-            logger(logging.DEBUG, 'Updating %i requests for activity %s', len(reqs), activity)
+            logger(logging.INFO, 'Updating %i requests for activity %s', len(reqs), activity)
 
         total_stopwatch = Stopwatch()
 
@@ -91,7 +90,7 @@ def run_once(bulk, db_bulk, suspicious_patterns, retry_protocol_mismatches, hear
                 logger(logging.WARNING, '%s', str(error))
 
         if reqs:
-            logger(logging.DEBUG, 'Finish to update %s finished requests for activity %s in %s seconds', len(reqs), activity, total_stopwatch.elapsed)
+            logger(logging.INFO, 'Finish to update %s finished requests for activity %s in %s seconds', len(reqs), activity, total_stopwatch.elapsed)
 
     except (DatabaseException, DatabaseError) as error:
         if re.match('.*ORA-00054.*', error.args[0]) or re.match('.*ORA-00060.*', error.args[0]) or 'ERROR 1205 (HY000)' in error.args[0]:
@@ -117,7 +116,7 @@ def finisher(once=False, sleep_time=60, activities=None, bulk=100, db_bulk=1000,
         pattern = str(suspicious_patterns)
         patterns = pattern.split(",")
         suspicious_patterns = [re.compile(pat.strip()) for pat in patterns]
-    logging.log(logging.DEBUG, "Suspicious patterns: %s" % [pat.pattern for pat in suspicious_patterns])
+    logging.log(logging.INFO, "Suspicious patterns: %s" % [pat.pattern for pat in suspicious_patterns])
 
     retry_protocol_mismatches = conveyor_config.get('retry_protocol_mismatches', False)
 
@@ -315,7 +314,7 @@ def __check_suspicious_files(req, suspicious_patterns, logger=logging.log):
         return is_suspicious
 
     try:
-        logger(logging.DEBUG, "Checking suspicious file for request: %s, transfer error: %s", req['request_id'], req['err_msg'])
+        logger(logging.INFO, "Checking suspicious file for request: %s, transfer error: %s", req['request_id'], req['err_msg'])
         for pattern in suspicious_patterns:
             if pattern.match(req['err_msg']):
                 is_suspicious = True
@@ -329,7 +328,7 @@ def __check_suspicious_files(req, suspicious_patterns, logger=logging.log):
                 for url in urls:
                     pfns.append(url['url'])
                 if pfns:
-                    logger(logging.DEBUG, "Found suspicious urls: %s", str(pfns))
+                    logger(logging.INFO, "Found suspicious urls: %s", str(pfns))
                     replica_core.declare_bad_file_replicas(pfns, reason=reason, issuer=InternalAccount('root', vo=req['scope'].vo), status=BadFilesStatus.SUSPICIOUS)
     except Exception as error:
         logger(logging.WARNING, "Failed to check suspicious file with request: %s - %s", req['request_id'], str(error))

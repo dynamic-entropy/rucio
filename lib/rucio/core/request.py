@@ -215,7 +215,7 @@ def queue_requests(requests, *, session: "Session", logger=logging.log):
     :param logger:    Optional decorated logger that can be passed from the calling daemons or servers.
     :returns:         List of Request-IDs as 32 character hex strings.
     """
-    logger(logging.DEBUG, "queue requests")
+    logger(logging.INFO, "queue requests")
 
     request_clause = []
     rses = {}
@@ -626,6 +626,7 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
     if not activity_shares:
         activity_shares = [None]
 
+    print("Share of requests to be processed: %s" % activity_shares)
     for share in activity_shares:
 
         query = select(
@@ -647,36 +648,39 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
                 models.Request, "INDEX(REQUESTS REQUESTS_TYP_STA_UPD_IDX)", 'oracle'
             )
 
-        if not include_dependent:
-            # filter out transfers which depend on some other "previous hop" requests.
-            # In particular, this is used to avoid multiple finishers trying to archive different
-            # transfers from the same path and thus having concurrent deletion of same rows from
-            # the transfer_hop table.
-            query = query.outerjoin(
-                models.TransferHop,
-                models.TransferHop.next_hop_request_id == models.Request.id
-            ).where(
-                models.TransferHop.next_hop_request_id == null()
-            )
+        query = query.filter(models.Request.rule_id == '2476E77F52324CC6AEEBA99D31F0DE8E'.lower())
+        query = query.with_for_update(skip_locked=True)
+        # if not include_dependent:
+        #     # filter out transfers which depend on some other "previous hop" requests.
+        #     # In particular, this is used to avoid multiple finishers trying to archive different
+        #     # transfers from the same path and thus having concurrent deletion of same rows from
+        #     # the transfer_hop table.
+        #     query = query.outerjoin(
+        #         models.TransferHop,
+        #         models.TransferHop.next_hop_request_id == models.Request.id
+        #     ).where(
+        #         models.TransferHop.next_hop_request_id == null()
+        #     )
 
-        if isinstance(older_than, datetime.datetime):
-            query = query.filter(models.Request.updated_at < older_than)
+        # if isinstance(older_than, datetime.datetime):
+        #     query = query.filter(models.Request.updated_at < older_than)
 
-        if rse_id:
-            query = query.filter(models.Request.dest_rse_id == rse_id)
+        # if rse_id:
+        #     query = query.filter(models.Request.dest_rse_id == rse_id)
 
-        if share:
-            query = query.filter(models.Request.activity == share)
-        elif activity:
-            query = query.filter(models.Request.activity == activity)
+        # if share:
+        #     query = query.filter(models.Request.activity == share)
+        # elif activity:
+        #     query = query.filter(models.Request.activity == activity)
 
-        query = filter_thread_work(session=session, query=query, total_threads=total_workers, thread_id=worker_number, hash_variable=hash_variable)
+        # query = filter_thread_work(session=session, query=query, total_threads=total_workers, thread_id=worker_number, hash_variable=hash_variable)
 
         if share:
             query = query.limit(activity_shares[share])
         else:
             query = query.limit(limit)
 
+        print("Query: %s" % query)
         query_result = session.execute(query).scalars()
         if query_result:
             if mode_all:
@@ -695,6 +699,7 @@ def get_next(request_type, state, limit=100, older_than=None, rse_id=None, activ
                 for res in query_result:
                     result.append({'request_id': res.id, 'external_host': res.external_host, 'external_id': res.external_id})
 
+    print("Number of requests to be processed: %s" % len(result))
     return result
 
 
@@ -1914,11 +1919,11 @@ def update_requests_priority(priority, filter_, *, session: "Session", logger=lo
                     }
                 )
                 session.execute(stmt)
-                logger(logging.DEBUG, "Updated request %s priority to %s in rucio." % (item.id, priority))
+                logger(logging.INFO, "Updated request %s priority to %s in rucio." % (item.id, priority))
                 if item.request_state == RequestState.SUBMITTED and item.lock_state == LockState.REPLICATING:
                     transfers_to_update.setdefault(item.external_host, {})[item.external_id] = priority
             except Exception:
-                logger(logging.DEBUG, "Failed to boost request %s priority: %s" % (item.id, traceback.format_exc()))
+                logger(logging.INFO, "Failed to boost request %s priority: %s" % (item.id, traceback.format_exc()))
         return transfers_to_update
     except IntegrityError as error:
         raise RucioException(error.args)
@@ -2133,7 +2138,7 @@ def get_source_rse(request_id, src_url, *, session: "Session", logger=logging.lo
             if source['url'] == src_url:
                 src_rse_id = source['rse_id']
                 src_rse_name = get_rse_name(src_rse_id, session=session)
-                logger(logging.DEBUG, "Find rse name %s for %s" % (src_rse_name, src_url))
+                logger(logging.INFO, "Find rse name %s for %s" % (src_rse_name, src_url))
                 return src_rse_name, src_rse_id
         # cannot find matched surl
         logger(logging.WARNING, 'Cannot get correct RSE for source url: %s' % (src_url))

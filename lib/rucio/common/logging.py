@@ -358,7 +358,7 @@ def setup_logging(application=None):
 
     stdouthandler = logging.StreamHandler(stream=sys.stdout)
     stdouthandler.setFormatter(rucio_log_formatter())
-    stdouthandler.setLevel(config_loglevel)
+    stdouthandler.setLevel(logging.DEBUG)
     logging.basicConfig(level=config_loglevel, handlers=[stdouthandler])
 
     if application:

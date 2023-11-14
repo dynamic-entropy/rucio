@@ -1,0 +1,61 @@
+diff --git a/lib/rucio/core/permission/__init__.py b/lib/rucio/core/permission/__init__.py
+index 69c94225a..710c49ff3 100644
+--- a/lib/rucio/core/permission/__init__.py
++++ b/lib/rucio/core/permission/__init__.py
+@@ -13,6 +13,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+
++import logging
+ import importlib
+ from configparser import NoOptionError, NoSectionError
+ from os import environ
+@@ -34,38 +35,49 @@ except (NoOptionError, NoSectionError):
+     multivo = False
+
+ # in multi-vo mode packages are loaded on demand when needed
++
+ if not multivo:
+     GENERIC_FALLBACK = 'generic'
+
+     if config.config_has_section('permission'):
+         try:
+             FALLBACK_POLICY = config.config_get('permission', 'policy')
++            logging.error(f"Setting fallback policy to {FALLBACK_POLICY}")
+         except (NoOptionError, NoSectionError):
+             FALLBACK_POLICY = GENERIC_FALLBACK
++            logging.error(f"Setting fallback policy to generic: {FALLBACK_POLICY}")
+     elif config.config_has_section('policy'):
+         try:
+             FALLBACK_POLICY = config.config_get('policy', 'permission')
++            logging.error(f"Setting fallback policy to {FALLBACK_POLICY}")
+         except (NoOptionError, NoSectionError):
+             FALLBACK_POLICY = GENERIC_FALLBACK
++            logging.error(f"Setting fallback policy to generic: {FALLBACK_POLICY}")
+     else:
+         FALLBACK_POLICY = GENERIC_FALLBACK
++        logging.error(f"Setting fallback policy to generic: {FALLBACK_POLICY}")
+
+     if config.config_has_section('policy'):
+         try:
+             if 'RUCIO_POLICY_PACKAGE' in environ:
+                 POLICY = environ['RUCIO_POLICY_PACKAGE']
++                logging.error(f"Setting policy package from environment variable: {POLICY}")
+             else:
+                 POLICY = config.config_get('policy', 'package', check_config_table=False)
++                logging.error(f"Setting policy package from config file: {POLICY}")
+             check_policy_package_version(POLICY)
+             POLICY = POLICY + ".permission"
+         except (NoOptionError, NoSectionError):
+             # fall back to old system for now
+             POLICY = 'rucio.core.permission.' + FALLBACK_POLICY.lower()
++            logging.error(f"Setting policy package to fallback: {POLICY}")
+     else:
+         POLICY = 'rucio.core.permission.' + GENERIC_FALLBACK.lower()
++        logging.error(f"Setting policy package to generic fallback: {POLICY}")
+
+     try:
+         module = importlib.import_module(POLICY)
++        logging.error(f"Setting permission module to {POLICY}")
+     except ImportError:
+         raise exception.PolicyPackageNotFound('Module ' + POLICY + ' not found')

@@ -1,0 +1,42 @@
+diff --git a/lib/rucio/core/oidc.py b/lib/rucio/core/oidc.py
+index 38a7066c2..5e6dbf3a1 100644
+--- a/lib/rucio/core/oidc.py
++++ b/lib/rucio/core/oidc.py
+@@ -134,8 +134,11 @@ def request_token(audience: str, scope: str, use_cache: bool = True) -> Optional
+ 
+     key = hashlib.md5(f'audience={audience};scope={scope}'.encode()).hexdigest()
+ 
+-    if use_cache and (token := _token_cache_get(key)):
+-        return token
++    # if use_cache and (token := _token_cache_get(key)):
++    #     return token
++
++    logging.debug('Requesting token for audience %s and scope %s', audience, scope)
++    logging.debug('OIDC_PROVIDER_ENDPOINT: %s', OIDC_PROVIDER_ENDPOINT)
+ 
+     try:
+         response = requests.post(url=OIDC_PROVIDER_ENDPOINT,
+@@ -143,6 +146,9 @@ def request_token(audience: str, scope: str, use_cache: bool = True) -> Optional
+                                  data={'grant_type': 'client_credentials',
+                                        'audience': audience,
+                                        'scope': scope})
++
++        logging.debug('Failed to procure a token: %s', response.text)
++
+         response.raise_for_status()
+         payload = response.json()
+         token = payload['access_token']
+@@ -322,8 +328,8 @@ def __get_init_oidc_client(token_object: models.Token = None, token_type: str =
+             if 'issuer_id' in kwargs:
+                 client_secret = secrets[kwargs.get('issuer_id', ADMIN_ISSUER_ID)]
+             elif 'issuer' in kwargs:
+-                client_secret = next((secrets[i] for i in secrets if 'issuer' in secrets[i] and  # NOQA: W504
+-                                      kwargs.get('issuer') in secrets[i]['issuer']), None)
++                client_secret = next((secrets[i] for i in secrets if 'issuer' in secrets[i]  # NOQA: W504
++                                      and kwargs.get('issuer') in secrets[i]['issuer']), None)
+             redirect_url = kwargs.get('redirect_uri', None)
+             if not redirect_url:
+                 redirect_to = kwargs.get("redirect_to", "auth/oidc_token")
+diff --git a/oidc_debug.patch b/oidc_debug.patch
+new file mode 100644
+index 000000000..e69de29bb

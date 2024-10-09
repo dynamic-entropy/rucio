@@ -631,6 +631,8 @@ def render_json(*args, **kwargs) -> str:
         data = args[0]
     elif isinstance(kwargs, dict):
         data = kwargs
+    elif not args and not kwargs:
+        data = {}
     else:
         raise ValueError("Error while serializing object to JSON-formatted string: supported input types are list or dict.")
     return json.dumps(data, cls=APIEncoder)

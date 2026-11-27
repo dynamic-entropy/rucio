@@ -135,6 +135,8 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
+nats-py==2.17.0
+    # via -r requirements.server.in
 oic==1.7.0
     # via -r requirements.server.in
 oracledb==4.0.1

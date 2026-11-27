@@ -16,6 +16,7 @@ recursive-include bin *
 recursive-include etc/ *.template
 recursive-include etc/mail_templates *.tmpl
 recursive-include lib/rucio/web/rest/flaskapi/v1/templates *.html
+recursive-include lib/rucio/transfertool/rta_schemas *
 prune lib/rucio/web/ui
 prune dist
 prune examples

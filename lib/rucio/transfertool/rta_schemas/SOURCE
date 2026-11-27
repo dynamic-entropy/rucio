@@ -1,0 +1,14 @@
+Vendored from https://github.com/dynamic-entropy/rta
+branch: cursor/rah-6-msg-schemas-fab7
+commit: 1ce92bf36fc817efa6436974896c859a5ff4f782
+path: schema/v1/
+
+Files:
+  cancel.json
+  token_reply.json
+  token_request.json
+  transfer_job.json
+  transfer_result.json
+
+These JSON Schemas are the v1 wire contract. Do not edit them in place.
+Copy a newer rta commit and update the commit recorded above.

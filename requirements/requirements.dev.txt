@@ -253,6 +253,8 @@ multidict==6.7.1
     #   yarl
 mypy-extensions==1.1.0
     # via black
+nats-py==2.17.0
+    # via -r requirements.server.txt
 nr-date==2.1.0
     # via databind
 nr-stream==1.1.5

@@ -12,3 +12,10 @@ Files:
 
 These JSON Schemas are the v1 wire contract. Do not edit them in place.
 Copy a newer rta commit and update the commit recorded above.
+
+Local deviation from that commit, pending the same edit upstream in
+dynamic-entropy/rta schema/v1/transfer_job.json:
+  Nats-Msg-Id is transfer_id:attempt, not transfer_id. The description on
+  TransferJob and on transfer_id said the header equals transfer_id. The
+  bus already publishes transfer_id:attempt. Upstream rta needs this
+  description change; the validation rules are unchanged.

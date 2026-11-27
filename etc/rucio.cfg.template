@@ -244,7 +244,9 @@ admin_issuer = wlcg
 # result_batch: default number of results pull_results fetches. Default: 100.
 # token_min_valid: seconds of token lifetime the responder should require. Default: 3900.
 #   The bus stores this for the token handler. It does not mint tokens.
-# lane_by_priority: reserved for the transfertool lane map. The bus does not read it for routing.
-# lane_by_activity: reserved for the transfertool lane map. The bus does not read it for routing.
+# lane_by_priority: not read. Priority lanes are fixed: 4 and above high, 3 normal, 2 and below low.
+# lane_by_activity: JSON object of activity name to high, normal, or low. Overrides the priority lane.
+#   Example: {"Express": "high", "User Subscriptions": "low"}
+#   The bus stores the string and does not route with it.
 [rta]
 nats_servers = nats://127.0.0.1:4222

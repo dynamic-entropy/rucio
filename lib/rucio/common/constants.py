@@ -146,6 +146,7 @@ class RseAttr:
     RESTRICTED_READ = 'restricted_read'
     RESTRICTED_WRITE = 'restricted_write'
     RULE_APPROVERS = 'rule_approvers'
+    RTA_ENABLED = 'rta_enabled'
     S3_URL_STYLE = 's3_url_style'
     SIGN_URL = 'sign_url'
     SIMULATE_MULTIRANGE = 'simulate_multirange'
@@ -214,6 +215,7 @@ RSE_ATTRS_BOOL = Literal[
     'is_object_store',
     'restricted_read',
     'restricted_write',
+    'rta_enabled',
     'skip_upload_stat',
     'staging_required',
     'strict_copy',

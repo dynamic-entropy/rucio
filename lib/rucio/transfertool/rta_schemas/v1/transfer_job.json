@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dynamic-entropy/rta/schema/v1/transfer_job.json",
   "title": "TransferJob",
-  "description": "One HTTPS or WebDAV third-party copy. Published on rta.v1.jobs.<lane>.<vo>.<dst_rse> with Nats-Msg-Id equal to transfer_id. Unknown properties are allowed so an older reader accepts a newer optional field. Writers, including the Go encoder, emit only the properties listed here. JSON numbers that are integers, including 1.0 and 3e0, are accepted and Go rewrites them to canonical integers. Metadata bytes are not rewritten. expires_at must be after created_at; JSON Schema cannot compare instants across offsets, so that check is Go-only.",
+  "description": "One HTTPS or WebDAV third-party copy. Published on rta.v1.jobs.<lane>.<vo>.<dst_rse> with Nats-Msg-Id equal to transfer_id:attempt. Unknown properties are allowed so an older reader accepts a newer optional field. Writers, including the Go encoder, emit only the properties listed here. JSON numbers that are integers, including 1.0 and 3e0, are accepted and Go rewrites them to canonical integers. Metadata bytes are not rewritten. expires_at must be after created_at; JSON Schema cannot compare instants across offsets, so that check is Go-only.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -29,7 +29,7 @@
     },
     "transfer_id": {
       "$ref": "#/$defs/natsToken",
-      "description": "Idempotency key and NATS Msg-Id. Equal to the Rucio request external_id. A single subject token: letters, digits, hyphen, and underscore only."
+      "description": "Idempotency key. Equal to the Rucio request external_id. Nats-Msg-Id is transfer_id:attempt, so a later attempt is not dropped as a duplicate. A single subject token: letters, digits, hyphen, and underscore only."
     },
     "request_id": {
       "$ref": "#/$defs/hexID",

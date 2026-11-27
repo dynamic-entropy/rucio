@@ -21,7 +21,7 @@ elsewhere (``rta admin init``); this module publishes and consumes them.
 Subjects and buckets follow the v1 layout:
 
 * jobs: ``rta.v1.jobs.<lane>.<vo>.<dst_rse>`` on stream ``RTA_JOBS``,
-  header ``Nats-Msg-Id`` equal to ``transfer_id``
+  header ``Nats-Msg-Id`` equal to ``<transfer_id>:<attempt>``
 * results: ``rta.v1.results.<vo>`` on stream ``RTA_RESULTS``, durable
   pull consumer ``rucio-<vo>`` with explicit ack
 * cancels: KV bucket ``rta_cancel``, key ``transfer_id``
@@ -39,12 +39,14 @@ TLS material and credentials come from the ``[rta]`` section of
 """
 
 import asyncio
+import atexit
 import concurrent.futures
 import configparser
 import datetime
 import functools
 import json
 import logging
+import os
 import re
 import ssl
 import threading
@@ -56,7 +58,7 @@ import nats
 import nats.errors
 from jsonschema import Draft202012Validator, FormatChecker
 from nats.js.api import AckPolicy, ConsumerConfig
-from nats.js.errors import BucketNotFoundError, FetchTimeoutError, KeyNotFoundError
+from nats.js.errors import BucketNotFoundError, FetchDisconnectedError, FetchTimeoutError, KeyNotFoundError, NotFoundError
 
 from rucio.common.config import ConfigNotFound, get_config
 
@@ -171,6 +173,25 @@ def _require_token(value: str, label: str) -> None:
         raise RTABusError(f"{label} must be letters, digits, hyphen, or underscore")
 
 
+def job_message_id(transfer_id: str, attempt: int) -> str:
+    """
+    Return the JetStream deduplication id for one submission attempt.
+
+    A later attempt of the same transfer uses a different id, so the new
+    tokens are not dropped by the duplicate window. Republishing the same
+    attempt keeps the same id.
+
+    :param transfer_id: Job ``transfer_id``. One NATS token.
+    :param attempt: Job ``attempt`` (the Rucio retry count).
+    :returns: ``<transfer_id>:<attempt>``.
+    :raises RTABusError: The id is not a token or the attempt is negative.
+    """
+    _require_token(transfer_id, "transfer_id")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise RTABusError("attempt must be a non-negative integer")
+    return f"{transfer_id}:{attempt}"
+
+
 def job_subject(lane: str, vo: str, rse: str) -> str:
     """
     Return the JetStream subject for one job.
@@ -271,6 +292,39 @@ def validate_job(payload: bytes) -> dict[str, object]:
     :raises RTASchemaError: The payload is not a valid TransferJob.
     """
     return _validate(payload, "transfer job", "transfer_job.json")
+
+
+def validate_cancel(payload: bytes) -> dict[str, object]:
+    """
+    Check a Cancel tombstone against the vendored v1 schema.
+
+    :param payload: JSON object encoded as UTF-8 bytes.
+    :returns: The parsed object.
+    :raises RTASchemaError: The payload is not a valid Cancel.
+    """
+    return _validate(payload, "cancel", "cancel.json")
+
+
+def validate_token_request(payload: bytes) -> dict[str, object]:
+    """
+    Check a TokenRequest against the vendored v1 schema.
+
+    :param payload: JSON object encoded as UTF-8 bytes.
+    :returns: The parsed object.
+    :raises RTASchemaError: The payload is not a valid TokenRequest.
+    """
+    return _validate(payload, "token request", "token_request.json")
+
+
+def validate_token_reply(payload: bytes) -> dict[str, object]:
+    """
+    Check a TokenReply against the vendored v1 schema.
+
+    :param payload: JSON object encoded as UTF-8 bytes.
+    :returns: The parsed object.
+    :raises RTASchemaError: The payload is not a valid TokenReply.
+    """
+    return _validate(payload, "token reply", "token_reply.json")
 
 
 def validate_result(payload: bytes) -> dict[str, object]:
@@ -374,8 +428,8 @@ class RTAConfig:
         _require_token(self.cluster_name, "cluster_name")
         if (self.tls_cert is None) != (self.tls_key is None):
             raise RTABusError("[rta] tls_cert and tls_key must be set together")
-        if self.connect_timeout < 1:
-            raise RTABusError("[rta] connect_timeout must be at least 1 second")
+        if self.connect_timeout <= 0:
+            raise RTABusError("[rta] connect_timeout must be positive")
         if self.operation_timeout <= 0:
             raise RTABusError("[rta] operation_timeout must be positive")
         if self.reconnect_time_wait < 0:
@@ -503,6 +557,12 @@ class RTABus:
     Token handlers run in a worker thread so a slow mint does not stall
     JetStream acks on the loop. Handlers must be thread-safe and must not
     call back into the bus.
+
+    The loop thread is a daemon. :meth:`close` is idempotent and registered
+    with :func:`atexit.register`. After :func:`os.fork`, the child drops the
+    inherited connection and the next call starts a new one.
+    Fetches for one VO share one durable pull subscription and are serialized
+    with an asyncio lock on the bus loop.
     """
 
     def __init__(self, config: RTAConfig) -> None:
@@ -519,11 +579,15 @@ class RTABus:
         self._conn_ready: Optional[asyncio.Event] = None
         self._start_error: Optional[Exception] = None
         self._closed = False
+        self._close_done = False
+        self._restart_after_fork = False
         self._nc: Optional[NATSClient] = None
         self._js: Optional[JetStreamContext] = None
-        self._result_subs: dict[str, JetStreamContext.PullSubscription] = {}
-        self._result_ack_wait: dict[str, float] = {}
+        self._result_subs: dict[str, "JetStreamContext.PullSubscription"] = {}
+        self._pull_locks: dict[str, asyncio.Lock] = {}
         self._token_subs: dict[str, Subscription] = {}
+        atexit.register(self.close)
+        os.register_at_fork(after_in_child=self._after_fork_child)
 
     def __enter__(self) -> "RTABus":
         """Start the bus and return it."""
@@ -550,7 +614,7 @@ class RTABus:
             self._ready.clear()
             self._start_error = None
             self._shutdown_requested.clear()
-            thread = threading.Thread(target=self._thread_main, name="rta-bus")
+            thread = threading.Thread(target=self._thread_main, name="rta-bus", daemon=True)
             self._thread = thread
             thread.start()
         wait = self._config.connect_timeout + 1
@@ -564,48 +628,64 @@ class RTABus:
 
     def close(self, timeout: Optional[float] = None) -> None:
         """
-        Drain the connection and stop the background loop.
+        Stop the loop, drain the connection, and join the background thread.
 
-        A second call does nothing. When the drain does not finish, the loop
-        is stopped so the thread can exit.
+        Pending tasks are cancelled and awaited on that loop before it closes.
+        A second call does nothing. :func:`atexit` calls this on process exit.
+        Calling it from the bus thread raises instead of joining itself.
 
         :param timeout: Seconds to wait for the thread. Defaults to ``operation_timeout``.
+        :raises RTABusError: Called from the bus thread.
         """
+        self._reject_loop_thread()
         with self._lock:
+            if self._close_done:
+                return
             thread = self._thread
             self._closed = True
+            self._restart_after_fork = False
             self._shutdown_requested.set()
         if thread is None:
+            self._close_done = True
             return
         limit = self._config.operation_timeout if timeout is None else timeout
+        if limit <= 0:
+            limit = self._config.operation_timeout
         self._signal_stop()
         thread.join(limit)
         if thread.is_alive():
             self._force_stop_loop()
             thread.join(limit)
+        self._close_done = True
 
     def publish_job(self, subject: str, payload: bytes, msg_id: str, timeout: Optional[float] = None) -> PublishAck:
         """
         Publish one TransferJob and wait for the JetStream PubAck.
 
         The payload is validated and then published unchanged. ``msg_id`` is
-        sent as ``Nats-Msg-Id`` and must equal the job ``transfer_id``. The
-        subject must be ``rta.v1.jobs.<lane>.<vo>.<destination rse>`` for that job.
+        sent as ``Nats-Msg-Id`` and must equal ``<transfer_id>:<attempt>``.
+        ``PublishAck.duplicate`` is true when JetStream dropped this body
+        because that id was already published. The subject must be
+        ``rta.v1.jobs.<lane>.<vo>.<destination rse>`` for that job.
 
         :param subject: JetStream subject.
         :param payload: UTF-8 JSON TransferJob.
-        :param msg_id: Deduplication id. Equal to ``transfer_id``.
+        :param msg_id: Deduplication id. ``<transfer_id>:<attempt>``.
         :param timeout: Seconds to wait for the PubAck.
-        :returns: The publish acknowledgement.
+        :returns: The publish acknowledgement, including ``duplicate``.
         :raises RTASchemaError: The payload is not a TransferJob.
         :raises RTABusError: The id or subject does not match the payload, or the bus is stopped.
         :raises RTATimeoutError: The PubAck did not arrive in time.
         """
-        self._require_running()
+        self._ensure_started()
         document = validate_job(payload)
         transfer_id = document.get("transfer_id")
-        if transfer_id != msg_id:
-            raise RTABusError("Nats-Msg-Id must equal transfer_id")
+        attempt = document.get("attempt")
+        if not isinstance(transfer_id, str) or isinstance(attempt, bool) or not isinstance(attempt, int):
+            raise RTASchemaError("transfer job", "transfer_id or attempt has the wrong type")
+        canonical = job_message_id(transfer_id, attempt)
+        if msg_id != canonical:
+            raise RTABusError("Nats-Msg-Id must equal transfer_id and attempt")
         expected = _job_subject_for(document)
         if subject != expected:
             raise RTABusError("job subject does not match lane, vo, and destination RSE")
@@ -618,15 +698,17 @@ class RTABus:
         Write a cancel tombstone to the ``rta_cancel`` bucket.
 
         :param transfer_id: KV key. One NATS token.
-        :param payload: Cancel JSON bytes. The bucket stores them as given.
+        :param payload: Cancel JSON bytes. They must match ``cancel.json``.
         :param timeout: Seconds to wait for the write.
         :returns: The new KV revision.
+        :raises RTASchemaError: The payload is not a Cancel, or its ``transfer_id`` is not the key.
         :raises RTABusError: The key is not a NATS token, the bucket is missing, or the bus is stopped.
         """
-        self._require_running()
+        self._ensure_started()
         _require_token(transfer_id, "transfer_id")
-        if not isinstance(payload, bytes):
-            raise RTABusError("cancel payload must be bytes")
+        document = validate_cancel(payload)
+        if document.get("transfer_id") != transfer_id:
+            raise RTASchemaError("cancel", "transfer_id does not equal the KV key")
         limit = self._limit(timeout)
         return self._call(self._put_cancel(transfer_id, payload), limit + 1)
 
@@ -639,7 +721,7 @@ class RTABus:
         :returns: The stored bytes, or None when the key is absent.
         :raises RTABusError: The bucket is missing or the bus is stopped.
         """
-        self._require_running()
+        self._ensure_started()
         _require_token(transfer_id, "transfer_id")
         limit = self._limit(timeout)
         return self._call(self._kv_get_state(transfer_id), limit + 1)
@@ -650,28 +732,37 @@ class RTABus:
         batch: Optional[int] = None,
         timeout: Optional[float] = None,
         ack_wait: Optional[float] = None,
+        max_deliver: Optional[int] = None,
     ) -> list[PulledResult]:
         """
         Pull a batch of results with an explicit-ack durable consumer.
 
-        The first call for a VO creates consumer ``rucio-<vo>`` on
-        ``RTA_RESULTS`` when it does not already exist. Later calls reuse it.
-        Messages that fail the result schema are left unacknowledged and the
-        call raises; nothing in that batch is returned.
+        Fetches for one VO are serialized on the bus loop. They share one
+        pull subscription for durable ``rucio-<vo>``, so two callers cannot
+        interleave deliveries on its pending queue.
 
-        An empty batch is returned when the fetch times out. That is the
-        normal idle poll.
+        If that consumer already exists, its ``ack_wait``, ``max_deliver``,
+        and filter subject are compared with this call. A difference is
+        written with a consumer update. When the server rejects the update,
+        the call raises and does not keep using the old settings.
+
+        Each message is validated on its own. A schema failure is logged with
+        a redacted body and terminated, so it cannot stall the consumer.
+        Valid messages from the same fetch are still returned.
+
+        An empty batch is returned when the fetch times out. A disconnect
+        during the fetch raises :class:`RTAConnectionError`.
 
         :param vo: Virtual organization. One NATS token.
         :param batch: Maximum messages. Defaults to ``result_batch``.
         :param timeout: Seconds to wait for a message.
-        :param ack_wait: Ack wait in seconds when this call creates the consumer.
-            Defaults to 120. A later call cannot change it.
+        :param ack_wait: Consumer ack wait in seconds. Defaults to 120.
+        :param max_deliver: Maximum deliveries. ``-1`` means unlimited.
         :returns: Valid results. Each one must be acked or naked.
-        :raises RTASchemaError: A fetched message is not a TransferResult.
-        :raises RTABusError: The consumer cannot be created or the bus is stopped.
+        :raises RTAConnectionError: The connection dropped during the fetch.
+        :raises RTABusError: The consumer cannot be created or updated, or the bus is stopped.
         """
-        self._require_running()
+        self._ensure_started()
         _require_token(vo, "vo")
         size = self._config.result_batch if batch is None else batch
         if size < 1:
@@ -679,8 +770,11 @@ class RTABus:
         wait = DEFAULT_ACK_WAIT if ack_wait is None else ack_wait
         if wait <= 0:
             raise RTABusError("ack_wait must be positive")
+        deliver = -1 if max_deliver is None else max_deliver
+        if deliver == 0 or deliver < -1:
+            raise RTABusError("max_deliver must be -1 or a positive integer")
         limit = self._limit(timeout)
-        return self._call(self._pull_results(vo, size, limit, wait), limit + 1)
+        return self._call(self._pull_results(vo, size, limit, wait, deliver), limit + 1)
 
     def serve_tokens(self, vo: str, handler: "Callable[[bytes], bytes]", timeout: Optional[float] = None) -> None:
         """
@@ -696,10 +790,27 @@ class RTABus:
         :param timeout: Seconds to wait for the subscription to flush.
         :raises RTABusError: This VO is already being served, or the bus is stopped.
         """
-        self._require_running()
+        self._ensure_started()
         _require_token(vo, "vo")
         limit = self._limit(timeout)
         self._call(self._serve_tokens(vo, handler), limit + 1)
+
+    def _ensure_started(self) -> None:
+        """Start the bus when a fork discarded the parent connection."""
+        if self._restart_after_fork:
+            self._restart_after_fork = False
+            self._closed = False
+            self._close_done = False
+            self._thread = None
+            self.start()
+            return
+        self._require_running()
+
+    def _reject_loop_thread(self) -> None:
+        """Raise when the caller is the bus thread. Waiting there deadlocks the loop."""
+        thread = self._thread
+        if thread is not None and threading.current_thread() is thread:
+            raise RTABusError("RTA bus methods cannot be called from the bus thread")
 
     def _require_running(self) -> None:
         """Raise when start() has not completed or close() has begun."""
@@ -710,6 +821,9 @@ class RTABus:
 
     def _call(self, coro: "Coroutine[None, None, _T]", timeout: Optional[float] = None) -> _T:
         """Run ``coro`` on the bus loop and wait."""
+        if self._thread is not None and threading.current_thread() is self._thread:
+            coro.close()
+            raise RTABusError("RTA bus methods cannot be called from the bus thread")
         loop = self._loop
         if self._closed or loop is None or not loop.is_running():
             coro.close()
@@ -794,10 +908,10 @@ class RTABus:
             servers=self._config.nats_servers,
             name="rucio-rta",
             allow_reconnect=True,
-            connect_timeout=max(1, int(self._config.connect_timeout)),
-            reconnect_time_wait=max(0, int(self._config.reconnect_time_wait)),
+            connect_timeout=self._config.connect_timeout,
+            reconnect_time_wait=self._config.reconnect_time_wait,
             max_reconnect_attempts=self._config.max_reconnect_attempts,
-            drain_timeout=max(1, int(self._config.operation_timeout)),
+            drain_timeout=self._config.operation_timeout,
             user_credentials=self._config.nats_creds,
             tls=tls_context,
             error_cb=self._on_error,
@@ -887,51 +1001,93 @@ class RTABus:
         except BucketNotFoundError as exc:
             raise RTABusError(f"KV bucket {name} does not exist") from exc
 
-    async def _pull_results(self, vo: str, batch: int, timeout: float, ack_wait: float) -> list[PulledResult]:
-        """Fetch one batch and validate every message before returning any."""
+    async def _pull_results(
+        self,
+        vo: str,
+        batch: int,
+        timeout: float,
+        ack_wait: float,
+        max_deliver: int,
+    ) -> list[PulledResult]:
+        """Fetch one batch. Terminate invalid messages and return the valid ones."""
         await self._ensure_connected()
-        subscription = await self._results_subscription(vo, ack_wait)
-        try:
-            messages = await subscription.fetch(batch, timeout=timeout)
-        except (FetchTimeoutError, nats.errors.TimeoutError):
-            # An idle consumer reports timeout rather than an empty batch.
-            return []
-        pulled: list[PulledResult] = []
-        for message in messages:
+        lock = self._pull_locks.get(vo)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._pull_locks[vo] = lock
+        async with lock:
+            subscription = await self._results_subscription(vo, ack_wait, max_deliver)
             try:
-                validate_result(message.data)
-            except RTASchemaError:
-                raise
-            try:
-                delivered = message.metadata.num_delivered
-            except nats.errors.NotJSMessageError as exc:
-                raise RTABusError("result message has no JetStream metadata") from exc
-            pulled.append(PulledResult(self, message, delivered))
-        return pulled
+                messages = await subscription.fetch(batch, timeout=timeout)
+            except FetchDisconnectedError as exc:
+                raise RTAConnectionError("NATS disconnected while pulling results") from exc
+            except (FetchTimeoutError, nats.errors.TimeoutError):
+                # An idle consumer reports timeout rather than an empty batch.
+                return []
+            pulled: list[PulledResult] = []
+            for message in messages:
+                try:
+                    validate_result(message.data)
+                except RTASchemaError as exc:
+                    LOGGER.warning(
+                        "RTA result on %s seq=%s failed schema (%s); terminating it. body=%s",
+                        message.subject,
+                        _stream_sequence(message),
+                        exc.detail,
+                        _redacted_body(message.data),
+                    )
+                    await message.term()
+                    continue
+                try:
+                    delivered = message.metadata.num_delivered
+                except nats.errors.NotJSMessageError as exc:
+                    raise RTABusError("result message has no JetStream metadata") from exc
+                pulled.append(PulledResult(self, message, delivered))
+            return pulled
 
-    async def _results_subscription(self, vo: str, ack_wait: float) -> "JetStreamContext.PullSubscription":
-        """Create or reuse the durable explicit-ack consumer for ``vo``."""
-        existing = self._result_subs.get(vo)
-        if existing is not None:
-            if self._result_ack_wait[vo] != ack_wait:
-                raise RTABusError("result consumer ack_wait is already set for this VO")
-            return existing
+    async def _results_subscription(
+        self,
+        vo: str,
+        ack_wait: float,
+        max_deliver: int,
+    ) -> "JetStreamContext.PullSubscription":
+        """Bind the durable consumer, creating or updating it to the requested config."""
         jetstream = self._require_jetstream()
         durable = results_consumer(vo)
-        config = ConsumerConfig(
+        subject = results_subject(vo)
+        desired = ConsumerConfig(
+            name=durable,
             durable_name=durable,
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=ack_wait,
-            filter_subject=results_subject(vo),
+            max_deliver=max_deliver,
+            filter_subject=subject,
         )
+        try:
+            info = await jetstream.consumer_info(RESULTS_STREAM, durable)
+        except NotFoundError:
+            info = None
+        if info is None or _consumer_differs(info.config, desired):
+            try:
+                await jetstream.add_consumer(RESULTS_STREAM, config=desired)
+            except Exception as exc:
+                current = "absent" if info is None else (
+                    f"ack_wait={info.config.ack_wait} max_deliver={info.config.max_deliver} "
+                    f"filter={info.config.filter_subject!r}"
+                )
+                raise RTABusError(
+                    f"result consumer {durable} ({current}) does not match "
+                    f"ack_wait={ack_wait} max_deliver={max_deliver} filter={subject!r}"
+                ) from exc
+        existing = self._result_subs.get(vo)
+        if existing is not None:
+            return existing
         subscription = await jetstream.pull_subscribe(
-            results_subject(vo),
+            subject,
             durable=durable,
             stream=RESULTS_STREAM,
-            config=config,
         )
         self._result_subs[vo] = subscription
-        self._result_ack_wait[vo] = ack_wait
         return subscription
 
     async def _serve_tokens(self, vo: str, handler: "Callable[[bytes], bytes]") -> None:
@@ -948,7 +1104,8 @@ class RTABus:
             await self._handle_token(message, handler)
 
         subscription = await client.subscribe(subject, queue=TOKEN_QUEUE, cb=_callback)
-        await client.flush(timeout=max(1, int(self._config.operation_timeout)))
+        # nats-py annotates flush's timeout as int. The implementation accepts a float.
+        await client.flush(timeout=self._config.operation_timeout)  # type: ignore[arg-type]
         self._token_subs[vo] = subscription
 
     async def _handle_token(self, message: "Msg", handler: "Callable[[bytes], bytes]") -> None:
@@ -957,13 +1114,25 @@ class RTABus:
             LOGGER.warning("RTA token request on %s had no reply subject", message.subject)
             return
         try:
-            reply = await asyncio.get_running_loop().run_in_executor(None, handler, message.data)
-        except Exception:
-            LOGGER.warning("RTA token responder failed on %s", message.subject)
-            reply = _TOKEN_FAILURE
+            validate_token_request(message.data)
+        except RTASchemaError as exc:
+            LOGGER.warning("RTA token request on %s failed schema: %s", message.subject, exc.detail)
+            reply: object = _TOKEN_FAILURE
+        else:
+            try:
+                reply = await asyncio.get_running_loop().run_in_executor(None, handler, message.data)
+            except Exception:
+                LOGGER.warning("RTA token responder failed on %s", message.subject)
+                reply = _TOKEN_FAILURE
         if not isinstance(reply, bytes):
             LOGGER.warning("RTA token responder on %s did not return bytes", message.subject)
             reply = _TOKEN_FAILURE
+        else:
+            try:
+                validate_token_reply(reply)
+            except RTASchemaError as exc:
+                LOGGER.warning("RTA token reply on %s failed schema: %s", message.subject, exc.detail)
+                reply = _TOKEN_FAILURE
         try:
             await message.respond(reply)
         except Exception:
@@ -1004,12 +1173,112 @@ class RTABus:
             except Exception as close_error:
                 LOGGER.warning("RTA NATS close failed: %s", close_error)
 
+    def _after_fork_child(self) -> None:
+        """Drop the parent's loop and connection. The next call starts a new one.
+
+        This runs in the child with only the forking thread alive. It does not
+        take the bus lock or call into the NATS client, because those locks may
+        have been held by a thread that no longer exists.
+        """
+        client = self._nc
+        self._nc = None
+        self._js = None
+        self._loop = None
+        self._thread = None
+        self._stop = None
+        self._conn_ready = None
+        self._start_error = None
+        self._closed = False
+        self._close_done = False
+        self._restart_after_fork = True
+        self._result_subs = {}
+        self._pull_locks = {}
+        self._token_subs = {}
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._shutdown_requested = threading.Event()
+        if client is not None:
+            _close_inherited_socket(client)
+
     def _require_jetstream(self) -> "JetStreamContext":
         """Return the JetStream context or raise when it is gone."""
         jetstream = self._js
         if jetstream is None:
             raise RTAConnectionError("RTA JetStream context is closed")
         return jetstream
+
+
+def _stream_sequence(message: "Msg") -> str:
+    """Return the stream sequence, or ``?`` when the message has no JetStream metadata."""
+    try:
+        return str(message.metadata.sequence.stream)
+    except nats.errors.NotJSMessageError:
+        return "?"
+
+
+def _redacted_body(payload: bytes) -> str:
+    """Return the JSON shape with every string replaced, so tokens are not logged."""
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        return "<not json>"
+    return json.dumps(_redact(document), separators=(",", ":"))
+
+
+def _redact(value: object) -> object:
+    """Replace strings and leave numbers, booleans, and nulls in place."""
+    if isinstance(value, dict):
+        redacted: dict[str, object] = {}
+        for key, item in value.items():
+            redacted[str(key)] = _redact(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    if isinstance(value, str):
+        return "***"
+    return value
+
+
+def _unlimited(value: Optional[int]) -> int:
+    """Treat a missing or negative max_deliver as unlimited."""
+    if value is None or value < 0:
+        return -1
+    return value
+
+
+def _policy_name(value: object) -> str:
+    """Return the ack policy name without the enum wrapper."""
+    raw = getattr(value, "value", value)
+    return str(raw)
+
+
+def _consumer_differs(current: "ConsumerConfig", desired: "ConsumerConfig") -> bool:
+    """Return whether the server consumer does not match the requested pull settings."""
+    current_wait = 0.0 if current.ack_wait is None else current.ack_wait
+    desired_wait = 0.0 if desired.ack_wait is None else desired.ack_wait
+    if abs(current_wait - desired_wait) > 0.05:
+        return True
+    if _unlimited(current.max_deliver) != _unlimited(desired.max_deliver):
+        return True
+    if (current.filter_subject or "") != (desired.filter_subject or ""):
+        return True
+    if _policy_name(current.ack_policy) != "explicit":
+        return True
+    return False
+
+
+def _close_inherited_socket(client: object) -> None:
+    """Close the NATS socket duplicated into a forked child."""
+    transport = getattr(client, "_transport", None)
+    writer = getattr(transport, "_io_writer", None)
+    raw = getattr(writer, "transport", None)
+    sock = raw.get_extra_info("socket") if raw is not None else None
+    if sock is None:
+        return
+    try:
+        sock.close()
+    except OSError:
+        LOGGER.debug("RTA child could not close the inherited NATS socket")
 
 
 def _stop_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:

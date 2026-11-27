@@ -137,6 +137,8 @@ multidict==6.7.1
     #   yarl
 nats-py==2.17.0
     # via -r requirements.server.in
+nkeys==0.2.1
+    # via nats-py
 oic==1.7.0
     # via -r requirements.server.in
 oracledb==4.0.1
@@ -188,7 +190,9 @@ pymongo==4.17.0
 pymysql==1.2.0
     # via -r requirements.server.in
 pynacl==1.6.2
-    # via paramiko
+    # via
+    #   nkeys
+    #   paramiko
 pyspnego==0.12.1
     # via requests-kerberos
 python-dateutil==2.9.0.post0

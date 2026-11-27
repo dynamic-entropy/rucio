@@ -22,6 +22,7 @@ server.
 import asyncio
 import configparser
 import json
+import os
 import shutil
 import socket
 import subprocess  # noqa: S404 -- docker starts the nats-server container
@@ -33,6 +34,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+pytest.importorskip("nats")
+
+import nats
+from nats.js.api import StorageType
+
 from rucio.transfertool.rta_bus import (
     CANCEL_BUCKET,
     JOBS_STREAM,
@@ -43,6 +49,7 @@ from rucio.transfertool.rta_bus import (
     RTABusError,
     RTAConfig,
     RTASchemaError,
+    job_message_id,
     job_subject,
     results_consumer,
     results_subject,
@@ -54,17 +61,15 @@ from rucio.transfertool.rta_bus import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-try:
-    import nats
-    from nats.js.api import StorageType
-except ImportError:
-    nats = None
-    StorageType = None
-
 
 def _token(prefix: str) -> str:
     """Return a NATS-safe id."""
     return prefix + uuid.uuid4().hex
+
+
+def _msg_id(transfer_id: str, attempt: int = 2) -> str:
+    """The deduplication id the bus requires for ``_job``."""
+    return job_message_id(transfer_id, attempt)
 
 
 def _job(transfer_id: str) -> bytes:
@@ -257,8 +262,6 @@ def _last_line(text: str) -> str:
 
 async def _provision(url: str) -> None:
     """Create the v1 stream and KV names on a fresh JetStream server."""
-    if nats is None:
-        raise RuntimeError("nats-py is not installed")
     deadline = time.monotonic() + 20
     last_error: Exception = RuntimeError("nats did not accept a connection")
     client = None
@@ -355,8 +358,6 @@ async def _ack_pending(url: str, consumer: str) -> int:
 @pytest.fixture(scope="session")
 def nats_url() -> "Iterator[str]":
     """One official nats-server with JetStream, or a skip when it cannot be started."""
-    if nats is None:
-        pytest.skip("nats-server container is absent: nats-py is not installed")
     binary = _docker()
     name = "rta-nats-" + uuid.uuid4().hex[:8]
     started = subprocess.run(
@@ -408,12 +409,18 @@ def test_publish_dedupes_on_msg_id(bus: RTABus) -> None:
     transfer_id = _token("dedupe")
     payload = _job(transfer_id)
     subject = job_subject("normal", "atlas", "SITE_B_DATADISK")
-    first = bus.publish_job(subject, payload, transfer_id)
-    second = bus.publish_job(subject, payload, transfer_id)
+    message_id = _msg_id(transfer_id)
+    first = bus.publish_job(subject, payload, message_id)
+    second = bus.publish_job(subject, payload, message_id)
     assert first.stream == JOBS_STREAM
     assert first.duplicate is False
     assert second.duplicate is True
     assert second.seq == first.seq
+    retried = json.loads(payload)
+    retried["attempt"] = 3
+    third = bus.publish_job(subject, json.dumps(retried).encode(), _msg_id(transfer_id, 3))
+    assert third.duplicate is False
+    assert third.seq != first.seq
 
 
 def test_publish_schema_rejection_does_not_store_a_message(bus: RTABus, nats_url: str) -> None:
@@ -466,28 +473,27 @@ def test_pull_results_acks_and_redelivers(bus: RTABus, nats_url: str) -> None:
     assert first[0].data == _result(transfer_id)
     assert first[0].num_delivered == 1
     assert asyncio.run(_ack_pending(nats_url, results_consumer(vo))) == 1
-
-    redelivered = None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        batch = bus.pull_results(vo, batch=1, timeout=0.5, ack_wait=1)
-        if batch:
-            redelivered = batch[0]
-            break
-    assert redelivered is not None
-    assert redelivered.num_delivered >= 2
-    redelivered.ack()
+    first[0].nak()
+    redelivered = bus.pull_results(vo, batch=1, timeout=2, ack_wait=1)
+    assert len(redelivered) == 1
+    assert redelivered[0].num_delivered >= 2
+    redelivered[0].ack()
     assert bus.pull_results(vo, batch=1, timeout=0.5, ack_wait=1) == []
     assert asyncio.run(_ack_pending(nats_url, results_consumer(vo))) == 0
 
 
-def test_pull_schema_rejection_does_not_ack(bus: RTABus, nats_url: str) -> None:
-    """A result that fails the schema stays outstanding."""
+def test_pull_terminates_a_poison_result_and_returns_valid_ones(bus: RTABus, nats_url: str) -> None:
+    """A schema failure is terminated. Valid messages in the same fetch are returned."""
     vo = _token("bad")
+    transfer_id = _token("good")
     asyncio.run(_publish(nats_url, results_subject(vo), b"{}"))
-    with pytest.raises(RTASchemaError, match="transfer result"):
-        bus.pull_results(vo, batch=1, timeout=2, ack_wait=30)
+    asyncio.run(_publish(nats_url, results_subject(vo), _result(transfer_id)))
+    pulled = bus.pull_results(vo, batch=10, timeout=2, ack_wait=30)
+    assert [item.data for item in pulled] == [_result(transfer_id)]
     assert asyncio.run(_ack_pending(nats_url, results_consumer(vo))) == 1
+    pulled[0].ack()
+    assert bus.pull_results(vo, batch=10, timeout=0.5, ack_wait=30) == []
+    assert asyncio.run(_ack_pending(nats_url, results_consumer(vo))) == 0
 
 
 def test_serve_tokens_replies_on_the_vo_subject(bus: RTABus, nats_url: str) -> None:
@@ -517,4 +523,108 @@ def test_close_stops_the_background_thread(nats_url: str) -> None:
     client.close()
     assert not any(thread.name == "rta-bus" and thread.is_alive() for thread in threading.enumerate())
     with pytest.raises(RTABusError, match="not running"):
-        client.publish_job(job_subject("normal", "atlas", "SITE_B_DATADISK"), _job(_token("closed")), _token("closed"))
+        closed_id = _token("closed")
+        client.publish_job(job_subject("normal", "atlas", "SITE_B_DATADISK"), _job(closed_id), _msg_id(closed_id))
+
+
+def test_fractional_timeouts_are_kept() -> None:
+    """Configured timeouts stay fractional instead of being truncated to whole seconds."""
+    config = RTAConfig(
+        nats_servers=["nats://127.0.0.1:4222"],
+        connect_timeout=1.5,
+        reconnect_time_wait=0.5,
+        operation_timeout=2.25,
+    )
+    assert config.connect_timeout == 1.5
+    assert config.reconnect_time_wait == 0.5
+    assert config.operation_timeout == 2.25
+
+
+def test_put_cancel_rejects_a_body_that_fails_the_schema(bus: RTABus) -> None:
+    """A cancel that is not cancel.json is not written."""
+    with pytest.raises(RTASchemaError, match="cancel"):
+        bus.put_cancel(_token("badcancel"), b"{}")
+
+
+def test_serve_tokens_replaces_an_invalid_reply(bus: RTABus, nats_url: str) -> None:
+    """A handler reply that fails token_reply.json is not sent to the agent."""
+    vo = _token("badtok")
+    request = b'{"v":1,"transfer_id":"job1","request_id":"abc","rse_id":"def","role":"source","min_valid_s":30}'
+
+    def handler(data: bytes) -> bytes:
+        return b"{}"
+
+    bus.serve_tokens(vo, handler)
+    reply = json.loads(asyncio.run(_request(nats_url, token_subject(vo), request)))
+    assert reply["error"]["code"] == "RESPONDER_FAILED"
+
+
+def test_pull_updates_an_existing_consumer(bus: RTABus, nats_url: str) -> None:
+    """A durable consumer whose ack wait differs is updated instead of ignored."""
+    vo = _token("cfg")
+    bus.pull_results(vo, batch=1, timeout=0.3, ack_wait=30)
+    bus.pull_results(vo, batch=1, timeout=0.3, ack_wait=1.5)
+    info = asyncio.run(_consumer_info(nats_url, results_consumer(vo)))
+    assert abs(info - 1.5) < 0.05
+
+
+def test_calls_from_the_loop_thread_raise(bus: RTABus) -> None:
+    """A call on the bus thread raises instead of waiting on that same loop."""
+    loop = bus._loop
+    assert loop is not None
+    caught: list[BaseException] = []
+
+    def on_loop() -> None:
+        try:
+            bus.pull_results(_token("loop"), batch=1, timeout=0.2)
+        except BaseException as exc:
+            caught.append(exc)
+
+    loop.call_soon_threadsafe(on_loop)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not caught:
+        time.sleep(0.05)
+    assert caught
+    assert isinstance(caught[0], RTABusError)
+    assert "bus thread" in str(caught[0])
+
+
+def test_fork_discards_the_parent_connection(nats_url: str) -> None:
+    """A forked child drops the inherited socket and can publish on a new connection."""
+    client = RTABus(_config(nats_url))
+    client.start()
+    transfer_id = _token("fork")
+    payload = _job(transfer_id)
+    subject = job_subject("normal", "atlas", "SITE_B_DATADISK")
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*multi-threaded, use of fork.*")
+        pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            ack = client.publish_job(subject, payload, _msg_id(transfer_id))
+            client.close()
+            alive = any(thread.name == "rta-bus" and thread.is_alive() for thread in threading.enumerate())
+            status = 0 if ack.duplicate is False and not alive else 1
+        except Exception:
+            status = 2
+        os._exit(status)
+    _pid, wait_status = os.waitpid(pid, 0)
+    try:
+        assert os.WIFEXITED(wait_status)
+        assert os.WEXITSTATUS(wait_status) == 0
+    finally:
+        client.close()
+        assert not any(thread.name == "rta-bus" and thread.is_alive() for thread in threading.enumerate())
+
+
+async def _consumer_info(url: str, consumer: str) -> float:
+    """Return the ack wait, in seconds, of one results consumer."""
+    connection = await nats.connect(url, connect_timeout=2, allow_reconnect=False, max_reconnect_attempts=0)
+    try:
+        info = await connection.jetstream().consumer_info(RESULTS_STREAM, consumer)
+        assert info.config.ack_wait is not None
+        return float(info.config.ack_wait)
+    finally:
+        await connection.close()

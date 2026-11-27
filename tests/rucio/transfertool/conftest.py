@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Give transfertool unit tests a config file before they import server modules.
+"""Keep transfertool unit tests off the database.
 
 ``pytest tests/rucio`` does not start a database. Importing the transfer tool
 loads the schema package, which requires a configuration file to exist.
-Client mode keeps those imports from opening a database connection.
+``RUCIO_CLIENT_MODE`` makes ``config_get`` return its default instead of
+opening a session. Without that, a config cache left by an earlier test
+(no ``[client]`` section) sends ``_scitags_ids`` and ``core.transfer`` at
+the missing ``[database]`` section.
 """
 
 import os
 import tempfile
+
+os.environ.setdefault("RUCIO_CLIENT_MODE", "1")
 
 if "RUCIO_CONFIG" not in os.environ:
     _handle = tempfile.NamedTemporaryFile(mode="w", prefix="rucio-rta-", suffix=".cfg", delete=False)

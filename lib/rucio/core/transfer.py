@@ -46,6 +46,7 @@ from rucio.transfertool.bittorrent import BittorrentTransfertool
 from rucio.transfertool.fts3 import FTS3Transfertool
 from rucio.transfertool.globus import GlobusTransferTool
 from rucio.transfertool.mock import MockTransfertool
+from rucio.transfertool.rta import RTATransfertool
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -79,6 +80,7 @@ TRANSFERTOOL_CLASSES_BY_NAME: "dict[str, type[Transfertool]]" = {
     GlobusTransferTool.external_name: GlobusTransferTool,
     MockTransfertool.external_name: MockTransfertool,
     BittorrentTransfertool.external_name: BittorrentTransfertool,
+    RTATransfertool.external_name: RTATransfertool,
 }
 
 

@@ -106,12 +106,6 @@ Changelog = "https://rucio.cern.ch/documentation/release-notes/"
 [tool.setuptools]
 include-package-data = true
 
-[tool.setuptools.package-data]
-"rucio.transfertool" = [
-  "rta_schemas/SOURCE",
-  "rta_schemas/v1/*.json",
-]
-
 script-files = [
   "bin/rucio",
   "bin/rucio-abacus-account",
@@ -149,6 +143,12 @@ script-files = [
   "bin/rucio-storage-consistency-actions",
   "bin/rucio-transmogrifier",
   "bin/rucio-undertaker"
+]
+
+[tool.setuptools.package-data]
+"rucio.transfertool" = [
+  "rta_schemas/SOURCE",
+  "rta_schemas/v1/*.json",
 ]
 
 [tool.setuptools.data-files]

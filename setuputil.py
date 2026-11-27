@@ -69,6 +69,7 @@ server_requirements_table = {
         'alembic<=1.16.5',
         'pymemcache<=4.0.0',
         'stomp-py<=8.2.0',
+        'nats-py[nkeys]<=2.17.0',
         'statsd<=4.0.1',
         'geoip2<=5.1.0',
         'google-auth<=2.50.0',

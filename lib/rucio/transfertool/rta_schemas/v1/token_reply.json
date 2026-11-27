@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dynamic-entropy/rta/schema/v1/token_reply.json",
+  "title": "TokenReply",
+  "description": "Reply to a TokenRequest, delivered to the requester inbox. Exactly one of a token or an error is set. Writers emit only these properties. The Go decoder ignores unknown properties.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["v", "token", "exp"],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "description": "Fresh bearer token. Do not log it."
+        },
+        "error": false,
+        "exp": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999999999,
+          "description": "Token expiry as seconds since the Unix epoch. Millisecond timestamps are above 10000000000 and are rejected."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["v", "error"],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "token": false,
+        "exp": false,
+        "error": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*$",
+              "description": "Machine-readable reason, for example REQUEST_NOT_ACTIVE. The set is open."
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\S(.*\\S)?$"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dynamic-entropy/rta/schema/v1/transfer_job.json",
+  "title": "TransferJob",
+  "description": "One HTTPS or WebDAV third-party copy. Published on rta.v1.jobs.<lane>.<vo>.<dst_rse> with Nats-Msg-Id equal to transfer_id. Unknown properties are allowed so an older reader accepts a newer optional field. Writers, including the Go encoder, emit only the properties listed here. JSON numbers that are integers, including 1.0 and 3e0, are accepted and Go rewrites them to canonical integers. Metadata bytes are not rewritten. expires_at must be after created_at; JSON Schema cannot compare instants across offsets, so that check is Go-only.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "v",
+    "transfer_id",
+    "request_id",
+    "attempt",
+    "vo",
+    "activity",
+    "priority",
+    "lane",
+    "created_at",
+    "expires_at",
+    "sources",
+    "destination",
+    "file",
+    "options",
+    "metadata"
+  ],
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "Schema version. Breaking changes use rta.v2 subjects."
+    },
+    "transfer_id": {
+      "$ref": "#/$defs/natsToken",
+      "description": "Idempotency key and NATS Msg-Id. Equal to the Rucio request external_id. A single subject token: letters, digits, hyphen, and underscore only."
+    },
+    "request_id": {
+      "$ref": "#/$defs/hexID",
+      "description": "Rucio request id. Hexadecimal or a UUID."
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rucio retry_count for this submission."
+    },
+    "vo": {
+      "$ref": "#/$defs/natsToken",
+      "description": "Virtual organization. One NATS subject token: letters, digits, hyphen, and underscore. Dots, stars, and > are rejected."
+    },
+    "activity": {
+      "$ref": "#/$defs/phrase",
+      "description": "Rucio activity, for example Production Input."
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rucio request priority. The usual scale is 1 through 5, higher more urgent. The lane is chosen by Rucio and carried separately."
+    },
+    "lane": {
+      "enum": ["high", "normal", "low"],
+      "description": "Priority lane selected by Rucio at submit."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Instant after which the job should not start. The Go API also requires this to be after created_at."
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/endpoint"
+      },
+      "description": "Sources tried in order. The agent moves to the next source only after a recoverable SOURCE error."
+    },
+    "destination": {
+      "$ref": "#/$defs/endpoint"
+    },
+    "file": {
+      "$ref": "#/$defs/file"
+    },
+    "options": {
+      "$ref": "#/$defs/options"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Opaque object. rta echoes it on the result verbatim."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "checksum_mode": { "enum": ["source", "target", "both"] }
+            },
+            "required": ["checksum_mode"]
+          }
+        },
+        "required": ["options"]
+      },
+      "then": {
+        "properties": {
+          "file": {
+            "properties": {
+              "checksums": { "minProperties": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "checksum_mode": { "enum": ["source", "target", "both"] },
+              "checksum_algo": { "const": "adler32" }
+            },
+            "required": ["checksum_mode", "checksum_algo"]
+          }
+        },
+        "required": ["options"]
+      },
+      "then": {
+        "properties": {
+          "file": {
+            "properties": {
+              "checksums": { "required": ["adler32"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "checksum_mode": { "enum": ["source", "target", "both"] },
+              "checksum_algo": { "const": "md5" }
+            },
+            "required": ["checksum_mode", "checksum_algo"]
+          }
+        },
+        "required": ["options"]
+      },
+      "then": {
+        "properties": {
+          "file": {
+            "properties": {
+              "checksums": { "required": ["md5"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "checksum_mode": { "enum": ["source", "target", "both"] },
+              "checksum_algo": { "const": "sha256" }
+            },
+            "required": ["checksum_mode", "checksum_algo"]
+          }
+        },
+        "required": ["options"]
+      },
+      "then": {
+        "properties": {
+          "file": {
+            "properties": {
+              "checksums": { "required": ["sha256"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "checksum_mode": { "enum": ["source", "target", "both"] },
+              "checksum_algo": { "const": "crc32" }
+            },
+            "required": ["checksum_mode", "checksum_algo"]
+          }
+        },
+        "required": ["options"]
+      },
+      "then": {
+        "properties": {
+          "file": {
+            "properties": {
+              "checksums": { "required": ["crc32"] }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "natsToken": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Safe in a NATS subject and as a KV key. No dot, star, greater-than, whitespace, or control character."
+    },
+    "hexID": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9A-Fa-f-]+$",
+      "description": "Hexadecimal or a UUID. Not a NATS subject token."
+    },
+    "phrase": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\s\\x00-\\x1F\\x7F]([^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$"
+    },
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(https|davs)://(?:[^@/\\s\\x00-\\x1F\\x7F:?#]+|\\[[^\\]\\s\\x00-\\x1F\\x7F/?#]+\\])(?::(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(?:/[^\\s\\x00-\\x1F\\x7F?#]*)?(?:\\?[^\\s\\x00-\\x1F\\x7F#]*)?(?:#[^\\s\\x00-\\x1F\\x7F]*)?$",
+      "description": "Absolute URL. The scheme is lowercase https or davs, the host is required, userinfo is forbidden, and a port must be 1 through 65535. http, dav, and other schemes are rejected."
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["url", "rse", "rse_id", "token"],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/url"
+        },
+        "rse": {
+          "$ref": "#/$defs/natsToken",
+          "description": "Rucio RSE name. A single NATS subject token."
+        },
+        "rse_id": {
+          "$ref": "#/$defs/hexID",
+          "description": "Rucio RSE id. Token refresh asks for this id; the responder recomputes audience and scope."
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\s\\x00-\\x1F\\x7F]+$",
+          "description": "Bearer token for this RSE. Do not log it. JSON carries the raw token; Go formatting redacts it."
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["scope", "name", "size", "checksums"],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/phrase"
+        },
+        "name": {
+          "$ref": "#/$defs/phrase"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "File size in bytes."
+        },
+        "checksums": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["adler32", "md5", "sha256", "crc32"]
+          },
+          "patternProperties": {
+            "^adler32$": { "type": "string", "pattern": "^[0-9a-f]{8}$" },
+            "^crc32$": { "type": "string", "pattern": "^[0-9a-f]{8}$" },
+            "^md5$": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "^sha256$": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": false,
+          "description": "Keys are the lowercase Rucio names adler32, md5, sha256, and crc32, not the FTS bulk string ADLER32:hex. Widths are 8, 32, 64, and 8 lowercase hex digits. Empty when checksum_mode is none. Otherwise checksum_algo must be one of these keys."
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "checksum_mode",
+        "checksum_algo",
+        "overwrite",
+        "strict_copy",
+        "create_parent",
+        "cleanup_on_failure",
+        "copy_mode",
+        "fallback_push",
+        "streams",
+        "timeout_s",
+        "scitag",
+        "ip_preference"
+      ],
+      "properties": {
+        "checksum_mode": {
+          "enum": ["none", "source", "target", "both"],
+          "description": "Which sides are checked against file.checksums. none skips verification. This matches FTS verify_checksum, including none when a site disables it. strict_copy is separate and skips the whole pre/post sequence."
+        },
+        "checksum_algo": {
+          "enum": ["adler32", "md5", "sha256", "crc32"],
+          "description": "One of adler32, md5, sha256, crc32. When checksum_mode is not none, this must be a key of file.checksums."
+        },
+        "overwrite": {
+          "type": "boolean",
+          "description": "When false and the destination exists, the result is DESTINATION/PREPARATION EEXIST and includes dst_file."
+        },
+        "strict_copy": {
+          "type": "boolean",
+          "description": "When true, skip existence, parent, checksum, size, and cleanup steps."
+        },
+        "create_parent": {
+          "type": "boolean"
+        },
+        "cleanup_on_failure": {
+          "type": "boolean"
+        },
+        "copy_mode": {
+          "enum": ["pull", "push"],
+          "description": "Which endpoint is active. The Go constructor fills pull when the field is the zero value."
+        },
+        "fallback_push": {
+          "type": "boolean",
+          "description": "After a failed pull, try push once. Never falls back on EACCES, EPERM, ENOENT, or ECANCELED."
+        },
+        "streams": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "description": "X-Number-Of-Streams hint. The Go constructor fills 1 when the field is the zero value. Values above 16 are rejected."
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Whole-transfer timeout in seconds. 0 means 600s plus 2s per MiB."
+        },
+        "scitag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "SciTag flow label, exp_id << 6 | activity_id, in 0..65535. 0 means Rucio did not supply one."
+        },
+        "ip_preference": {
+          "enum": ["any", "v4", "v6"],
+          "description": "Address family for connections rta itself dials. The Go constructor fills any when the field is the zero value."
+        }
+      }
+    }
+  }
+}

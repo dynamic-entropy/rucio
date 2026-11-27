@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dynamic-entropy/rta/schema/v1/cancel.json",
+  "title": "Cancel",
+  "description": "Tombstone stored in the rta_cancel KV bucket under key transfer_id. Unknown properties are allowed. transfer_id is the KV key and must be a single safe token.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["v", "transfer_id", "request_id", "reason", "issued_at"],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "transfer_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "KV key. Letters, digits, hyphen, and underscore only."
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9A-Fa-f-]+$"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\s\\x00-\\x1F\\x7F]([^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$",
+      "description": "Why Rucio cancelled the request, for example rule deleted."
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

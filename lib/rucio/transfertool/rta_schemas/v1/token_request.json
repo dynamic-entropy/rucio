@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dynamic-entropy/rta/schema/v1/token_request.json",
+  "title": "TokenRequest",
+  "description": "Core NATS request on rta.v1.token.<vo>, served by the rucio-token queue group. The responder recomputes audience and scope from request_id and rse_id. Those two names are forbidden here even though other unknown properties are allowed.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["v", "transfer_id", "request_id", "rse_id", "role", "min_valid_s"],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "transfer_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9A-Fa-f-]+$"
+    },
+    "rse_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9A-Fa-f-]+$",
+      "description": "RSE the new token is for. Must be the request's source or destination. Hexadecimal or a UUID."
+    },
+    "audience": false,
+    "scope": false,
+    "role": {
+      "enum": ["source", "destination"]
+    },
+    "min_valid_s": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Minimum remaining lifetime, in seconds, the caller will accept."
+    }
+  }
+}

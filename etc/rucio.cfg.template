@@ -226,3 +226,25 @@ admin_issuer = wlcg
 
 [api]
 #endpoints = accountlimits, accounts, config, credentials, dids, export, heartbeats, identities, import, lifetime_exceptions, locks, meta, ping, redirect, replicas, requests, rses, rules, scopes, subscriptions
+
+# RTA NATS bus (lib/rucio/transfertool/rta_bus.py). Server only.
+# nats_servers is required. The other keys are optional.
+#
+# nats_servers: comma-separated NATS URLs, for example nats://127.0.0.1:4222.
+#   tls:// URLs turn on TLS. Do not put passwords in the URL; use nats_creds.
+# nats_creds: path to a NATS credentials file (user JWT and nkey).
+# tls_ca: CA bundle used to verify the NATS server certificate.
+# tls_cert: client certificate for mutual TLS. Requires tls_key.
+# tls_key: client private key for mutual TLS. Requires tls_cert.
+# cluster_name: logical cluster name. Later RTA wiring uses rta://<cluster_name>. Default: rta.
+# connect_timeout: seconds to wait for the first TCP connection. Default: 5.
+# operation_timeout: seconds for publish, KV, pull, and subscribe calls. Default: 10.
+# reconnect_time_wait: seconds between reconnect attempts. Default: 2.
+# max_reconnect_attempts: retries after a dropped connection. -1 retries forever. Default: -1.
+# result_batch: default number of results pull_results fetches. Default: 100.
+# token_min_valid: seconds of token lifetime the responder should require. Default: 3900.
+#   The bus stores this for the token handler. It does not mint tokens.
+# lane_by_priority: reserved for the transfertool lane map. The bus does not read it for routing.
+# lane_by_activity: reserved for the transfertool lane map. The bus does not read it for routing.
+[rta]
+nats_servers = nats://127.0.0.1:4222

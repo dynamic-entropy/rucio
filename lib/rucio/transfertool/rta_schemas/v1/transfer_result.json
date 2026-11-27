@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dynamic-entropy/rta/schema/v1/transfer_result.json",
+  "title": "TransferResult",
+  "description": "Terminal outcome of one job. Published on rta.v1.results.<vo> with Nats-Msg-Id equal to transfer_id + ':' + state. Unknown properties are allowed so an older receiver accepts a newer optional field. Writers emit only the listed properties. started_at and finished_at ordering is a Go-only check because JSON Schema cannot compare instants across offsets.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "v",
+    "transfer_id",
+    "request_id",
+    "attempt",
+    "agent_id",
+    "delivery",
+    "state",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "bytes",
+    "avg_throughput_bps",
+    "metadata"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "transfer_id": {
+      "$ref": "#/$defs/natsToken"
+    },
+    "request_id": {
+      "$ref": "#/$defs/hexID"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "agent_id": {
+      "$ref": "#/$defs/natsToken",
+      "description": "Agent that ran the transfer."
+    },
+    "delivery": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Broker delivery count for the job this result came from."
+    },
+    "state": {
+      "enum": ["DONE", "FAILED", "CANCELED"],
+      "description": "DONE and FAILED are terminal transfer outcomes. CANCELED is the terminal outcome of a Rucio-initiated cancel. The receiver (RAH-22) must ack and record it. It must not map CANCELED to FAILED, because should_retry_request retries every FAILED request. The request is already handled by the cancel path."
+    },
+    "source_url_used": {
+      "$ref": "#/$defs/url",
+      "description": "Byte-for-byte copy of the job source URL that was attempted. Do not rewrite davs to https, add a default port, or drop a slash: Rucio compares this string with == to the stored PFN. Required when state is DONE or error.scope is SOURCE. Optional only when the job dies before a source is chosen, for example TOKEN_EXPIRED at pickup."
+    },
+    "copy_mode_used": {
+      "enum": ["pull", "push"],
+      "description": "Required when state is DONE."
+    },
+    "ip_version": {
+      "enum": ["ipv4", "ipv6"],
+      "description": "Address family reported by RemoteConnections. Omitted when the copy did not report one."
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "avg_throughput_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Average throughput in bytes per second."
+    },
+    "checksum": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/checksum"
+        }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/transferError"
+        }
+      ]
+    },
+    "dst_file": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/dstFile"
+        }
+      ],
+      "description": "Existing destination file. Required when error.code is EEXIST. The wire field is size, matching the v1 design. RTATransferStatusReport (RAH-22) maps size to file_size before FTS _dst_file_set_and_file_correct / _dst_file_set_and_file_corrupted. There is no file_on_tape; tape is out of scope."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "The job metadata, echoed verbatim."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "DONE"
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "required": ["source_url_used", "copy_mode_used"],
+        "properties": {
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "FAILED"
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/transferError"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": "EEXIST"
+              }
+            },
+            "required": ["code"]
+          }
+        },
+        "required": ["error"]
+      },
+      "then": {
+        "required": ["dst_file"],
+        "properties": {
+          "dst_file": {
+            "$ref": "#/$defs/dstFile"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": { "scope": { "const": "SOURCE" } },
+            "required": ["scope"]
+          }
+        },
+        "required": ["error"]
+      },
+      "then": { "required": ["source_url_used"] }
+    },
+    {
+      "if": {
+        "properties": { "state": { "const": "CANCELED" } },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "error": { "type": "null" },
+          "dst_file": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "natsToken": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "hexID": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9A-Fa-f-]+$"
+    },
+    "phrase": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\s\\x00-\\x1F\\x7F]([^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$"
+    },
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(https|davs)://(?:[^@/\\s\\x00-\\x1F\\x7F:?#]+|\\[[^\\]\\s\\x00-\\x1F\\x7F/?#]+\\])(?::(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(?:/[^\\s\\x00-\\x1F\\x7F?#]*)?(?:\\?[^\\s\\x00-\\x1F\\x7F#]*)?(?:#[^\\s\\x00-\\x1F\\x7F]*)?$",
+      "description": "Absolute URL. The scheme is lowercase https or davs, the host is required, userinfo is forbidden, and a port must be 1 through 65535."
+    },
+    "checksum": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["algo"],
+      "properties": {
+        "algo": {
+          "enum": ["adler32", "md5", "sha256", "crc32"]
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "description": "Lowercase hex. adler32 is 8 characters and md5 is 32; the Go API enforces the width from algo."
+        },
+        "destination": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "description": "Lowercase hex. adler32 is 8 characters and md5 is 32; the Go API enforces the width from algo."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "algo": { "const": "adler32" } },
+            "required": ["algo"]
+          },
+          "then": {
+            "properties": {
+              "source": { "pattern": "^$|^[0-9a-f]{8}$" },
+              "destination": { "pattern": "^$|^[0-9a-f]{8}$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "algo": { "const": "md5" } },
+            "required": ["algo"]
+          },
+          "then": {
+            "properties": {
+              "source": { "pattern": "^$|^[0-9a-f]{32}$" },
+              "destination": { "pattern": "^$|^[0-9a-f]{32}$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "algo": { "const": "sha256" } },
+            "required": ["algo"]
+          },
+          "then": {
+            "properties": {
+              "source": { "pattern": "^$|^[0-9a-f]{64}$" },
+              "destination": { "pattern": "^$|^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "algo": { "const": "crc32" } },
+            "required": ["algo"]
+          },
+          "then": {
+            "properties": {
+              "source": { "pattern": "^$|^[0-9a-f]{8}$" },
+              "destination": { "pattern": "^$|^[0-9a-f]{8}$" }
+            }
+          }
+        }
+      ]
+    },
+    "transferError": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["scope", "phase", "code", "recoverable", "message"],
+      "properties": {
+        "scope": {
+          "enum": ["SOURCE", "DESTINATION", "TRANSFER"]
+        },
+        "phase": {
+          "enum": ["PREPARATION", "TRANSFER", "FINALIZATION"]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "description": "Errno-style code such as EEXIST, or TOKEN_EXPIRED. The set is open."
+        },
+        "http_status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599,
+          "description": "HTTP status when the failure came from a response. Omit it otherwise."
+        },
+        "recoverable": {
+          "type": "boolean",
+          "description": "Advisory only. The stock finisher does not read it. RAH-22 must not treat recoverable as the retry bit, and must not retry CANCELED. A false value means the agent considers the failure terminal; the receiver still has to honour that explicitly."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "^(SOURCE|DESTINATION|TRANSFER) \\[([0-9]+|[A-Z][A-Z0-9_]*)\\] \\S(.*\\S)?$",
+          "description": "Canonical FTS-shaped text: <SCOPE> [<errno or CODE>] <sentence>, optional suffix detail. The first word equals scope. EEXIST must contain 'Destination file exists and overwrite is not enabled'. The receiver passes this string through as reason and must not prepend TRANSFER_FAILED:. The column is String(4000). RAH-22 must honour this."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "scope": { "const": "SOURCE" } }, "required": ["scope"] },
+          "then": { "properties": { "message": { "pattern": "^SOURCE \\[" } } }
+        },
+        {
+          "if": { "properties": { "scope": { "const": "DESTINATION" } }, "required": ["scope"] },
+          "then": { "properties": { "message": { "pattern": "^DESTINATION \\[" } } }
+        },
+        {
+          "if": { "properties": { "scope": { "const": "TRANSFER" } }, "required": ["scope"] },
+          "then": { "properties": { "message": { "pattern": "^TRANSFER \\[" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": "EEXIST" } }, "required": ["code"] },
+          "then": { "properties": { "message": { "pattern": "Destination file exists and overwrite is not enabled" } } }
+        }
+      ]
+    },
+    "dstFile": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["size", "checksum_type", "checksum_value"],
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Byte size. RAH-22 maps this to file_size for the FTS overwrite helpers. The wire name stays size."
+        },
+        "checksum_type": {
+          "enum": ["adler32", "md5", "sha256", "crc32"]
+        },
+        "checksum_value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]+$",
+          "description": "Lowercase hex. adler32 is 8 characters and md5 is 32, zero-padded, so Rucio's == comparison against request.adler32 / request.md5 succeeds."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "checksum_type": { "const": "adler32" } },
+            "required": ["checksum_type"]
+          },
+          "then": { "properties": { "checksum_value": { "pattern": "^[0-9a-f]{8}$" } } }
+        },
+        {
+          "if": {
+            "properties": { "checksum_type": { "const": "md5" } },
+            "required": ["checksum_type"]
+          },
+          "then": { "properties": { "checksum_value": { "pattern": "^[0-9a-f]{32}$" } } }
+        },
+        {
+          "if": {
+            "properties": { "checksum_type": { "const": "sha256" } },
+            "required": ["checksum_type"]
+          },
+          "then": { "properties": { "checksum_value": { "pattern": "^[0-9a-f]{64}$" } } }
+        },
+        {
+          "if": {
+            "properties": { "checksum_type": { "const": "crc32" } },
+            "required": ["checksum_type"]
+          },
+          "then": { "properties": { "checksum_value": { "pattern": "^[0-9a-f]{8}$" } } }
+        }
+      ]
+    }
+  }
+}

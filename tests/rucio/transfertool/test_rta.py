@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from rucio.common.constants import RseAttr
-from rucio.common.exception import RucioException
+from rucio.common.exception import RucioException, TransferToolWrongAnswer
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.core.request import DirectTransfer, RequestSource, RequestWithSources, TransferDestination
 from rucio.core.rse import RseData
@@ -79,6 +79,7 @@ def _hop(
     adler32: str = "AbC",
     md5: str = "A" * 32,
     strict_copy: bool = False,
+    vo: str = "def",
 ) -> DirectTransfer:
     """One hop whose source_url and dest_url are the given strings, unchanged."""
     src = src or _rse("SRC_DISK", "11111111111141118111111111111111")
@@ -88,7 +89,7 @@ def _hop(
         id_=request_id,
         request_type=RequestType.TRANSFER,
         rule_id=None,
-        scope=InternalScope("mc23"),
+        scope=InternalScope("mc23", vo=vo),
         name="EVNT.123._000001.pool.root.1",
         md5=md5,
         adler32=adler32,
@@ -144,15 +145,15 @@ def _config(lane_by_activity: Optional[str] = None) -> RTAConfig:
     )
 
 
-def _patch_tokens(monkeypatch: pytest.MonkeyPatch, *, fail_rse: Optional[str] = None) -> list[tuple[str, list[str]]]:
+def _patch_tokens(monkeypatch: pytest.MonkeyPatch, *, fail_rse: Optional[str] = None) -> list[tuple[str, list[str], list[str]]]:
     """Replace audience, scope, and minting. Record the scopes that were requested."""
-    requested: list[tuple[str, list[str]]] = []
+    requested: list[tuple[str, list[str], list[str]]] = []
 
     def audience(rse_id: str) -> str:
         return "aud-" + rse_id[:8]
 
     def scope(rse_id: str, scopes: list[str], extra_scopes: Optional[list[str]] = None) -> str:
-        requested.append((rse_id, list(scopes)))
+        requested.append((rse_id, list(scopes), list(extra_scopes or [])))
         return "storage.read"
 
     def mint(audience: str, scope: str, use_cache: bool = True) -> Optional[str]:
@@ -179,7 +180,8 @@ def _patch_tokens(monkeypatch: pytest.MonkeyPatch, *, fail_rse: Optional[str] = 
         (None, "Production Input", None, "normal"),
         (1, "Express", '{"Express": "high"}', "high"),
         (5, "User Subscriptions", '{"User Subscriptions": "low"}', "low"),
-        (5, "Other", '{"Express": "high"}', "high"),
+        (5, "Other", '{"Express": "low"}', "high"),
+        (1, "Other", '{"Express": "high"}', "low"),
         (3, "Express", '{"Express": "urgent"}', "normal"),
         (1, "Express", "not-json", "low"),
     ],
@@ -204,18 +206,35 @@ def test_lane_for_priority_and_activity(
         "tape_source",
         "staging_source",
         "one_source_not_davs",
+        "no_rta_dest",
+        "no_oidc_dest",
+        "https_dest",
     ],
 )
 def test_ineligible_path_returns_empty(monkeypatch: pytest.MonkeyPatch, mutate: str) -> None:
     """A hop that is not davs, token-capable, and disk returns [] so fts3 can take it."""
     monkeypatch.setattr("rucio.transfertool.rta.RTAConfig.from_config", lambda: _config())
-    src = _rse("SRC_DISK", "11111111111141118111111111111111", rta=mutate != "no_rta", oidc=mutate != "no_oidc", tape=mutate == "tape_source", staging=mutate == "staging_source")
-    dst = _rse("DST_DISK", "22222222222242228222222222222222", tape=mutate == "tape_dest")
+    src = _rse(
+        "SRC_DISK",
+        "11111111111141118111111111111111",
+        rta=mutate != "no_rta",
+        oidc=mutate != "no_oidc",
+        tape=mutate == "tape_source",
+        staging=mutate == "staging_source",
+    )
+    dst = _rse(
+        "DST_DISK",
+        "22222222222242228222222222222222",
+        rta=mutate != "no_rta_dest",
+        oidc=mutate != "no_oidc_dest",
+        tape=mutate == "tape_dest",
+    )
     extra = None
     src_scheme = "https" if mutate == "https" else "davs"
+    dst_scheme = "https" if mutate == "https_dest" else "davs"
     if mutate == "one_source_not_davs":
         extra = [(_rse("SRC_OTHER", "33333333333343338333333333333333"), "https", "https://other.example/file.1")]
-    hop = _hop(src=src, dst=dst, src_scheme=src_scheme, extra_sources=extra)
+    hop = _hop(src=src, dst=dst, src_scheme=src_scheme, dst_scheme=dst_scheme, extra_sources=extra)
     assigned, builder = RTATransfertool.submission_builder_for_path([hop])
     assert assigned == []
     assert builder is None
@@ -303,7 +322,9 @@ def test_submit_job_validates_and_keeps_pfns(
     source_scopes = [call for call in scopes if call[0].startswith("1111")]
     dest_scopes = [call for call in scopes if call[0].startswith("2222")]
     assert source_scopes[0][1] == ["storage.read"]
+    assert source_scopes[0][2] == ["offline_access"]
     assert dest_scopes[0][1] == ["storage.modify", "storage.read"]
+    assert dest_scopes[0][2] == ["offline_access"]
 
 
 def test_activity_lane_is_on_the_subject(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,6 +342,27 @@ def test_activity_lane_is_on_the_subject(monkeypatch: pytest.MonkeyPatch) -> Non
     assert subject == "rta.v1.jobs.high.def.DST_DISK"
 
 
+def test_unsafe_subject_falls_back_and_does_not_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dotted VO or RSE name is not an RTA hop, and submit does not mint tokens for it."""
+    monkeypatch.setattr("rucio.transfertool.rta.RTAConfig.from_config", lambda: _config())
+    for hop in (
+        _hop(dst=_rse("DST.DISK", "22222222222242228222222222222222")),
+        _hop(src=_rse("SRC.DISK", "11111111111141118111111111111111")),
+        _hop(vo="atlas.prod"),
+    ):
+        assigned, builder = RTATransfertool.submission_builder_for_path([hop])
+        assert assigned == []
+        assert builder is None
+
+    scopes = _patch_tokens(monkeypatch)
+    bus = MagicMock()
+    tool = RTATransfertool(external_host="rta://prod", bus=bus)
+    with pytest.raises(TransferToolWrongAnswer):
+        tool.submit([_hop(dst=_rse("DST.DISK", "22222222222242228222222222222222"))], {})
+    bus.publish_job.assert_not_called()
+    assert scopes == []
+
+
 def test_token_mint_failure_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing token is raised and nothing is published."""
     _patch_tokens(monkeypatch, fail_rse="22222222222242228222222222222222")
@@ -332,7 +374,7 @@ def test_token_mint_failure_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_bulk_query_reads_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing rta_state key is lost. A stored value stays submitted."""
+    """A stored non-terminal value is an empty report, which the poller leaves submitted."""
     bus = MagicMock()
 
     def read(transfer_id: str, timeout: Optional[float] = None) -> Optional[bytes]:
@@ -343,8 +385,18 @@ def test_bulk_query_reads_state(monkeypatch: pytest.MonkeyPatch) -> None:
     bus.kv_get_state.side_effect = read
     tool = RTATransfertool(external_host="rta://prod", bus=bus)
     result = tool.bulk_query({"missing": {"req": {}}, "present": {"req": {}}})
-    assert result["missing"] is None
+    assert result["missing"] == {}
     assert result["present"] == {}
+
+
+def test_missing_rta_state_stays_submitted() -> None:
+    """A missing rta_state key is not LOST. The poller treats {} as still SUBMITTED."""
+    bus = MagicMock()
+    bus.kv_get_state.return_value = None
+    tool = RTATransfertool(external_host="rta://prod", bus=bus)
+    result = tool.bulk_query({"queued": {"req-1": {"state": "S"}}})
+    assert result["queued"] == {}
+    assert result["queued"] is not None
 
 
 def test_cancel_puts_a_valid_tombstone() -> None:

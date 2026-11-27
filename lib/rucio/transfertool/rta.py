@@ -250,6 +250,26 @@ class RTATransfertool(Transfertool):
         return True
 
     @classmethod
+    def _subject_tokens_ok(cls, hop: "DirectTransfer") -> bool:
+        """
+        True when the VO and every RSE name can sit in a NATS subject.
+
+        ``job_subject`` rejects anything outside ``^[A-Za-z0-9_-]+$``. A dotted
+        VO or RSE name must not be accepted here: the conveyor would keep
+        retrying this tool, and ``publish_job`` would reject the subject after
+        the tokens had already been minted.
+        """
+        scope = hop.rws.scope
+        vo = scope.vo if scope is not None and scope.vo else "def"
+        names = [hop.dst.rse.name, *(source.rse.name for source in hop.sources)]
+        try:
+            for name in names:
+                job_subject("normal", vo, name)
+        except RTABusError:
+            return False
+        return True
+
+    @classmethod
     def submission_builder_for_path(
         cls,
         transfer_path: "list[DirectTransfer]",
@@ -269,7 +289,7 @@ class RTATransfertool(Transfertool):
         if not transfer_path:
             return [], None
         hop = transfer_path[0]
-        if not cls._hop_eligible(hop):
+        if not cls._hop_eligible(hop) or not cls._subject_tokens_ok(hop):
             logger(logging.INFO, "RTATransfertool cannot submit %s", hop)
             return [], None
         try:
@@ -392,6 +412,14 @@ class RTATransfertool(Transfertool):
         scope = transfer.rws.scope
         vo = scope.vo if scope is not None and scope.vo else "def"
         scope_name = scope.external if scope is not None and scope.external else str(scope)
+        # Reject a VO or RSE name that cannot be a subject token before minting.
+        # submission_builder_for_path already returns [] for these hops so fts3
+        # can take them. This is the backstop when submit is called directly.
+        dst_name = transfer.dst.rse.name
+        subject = job_subject(lane, vo, dst_name)
+        for source in transfer.sources:
+            job_subject(lane, vo, source.rse.name)
+        msg_id = job_message_id(request_id, attempt)
         created = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         lifetime = transfer.rws.attributes.get("lifetime")
         if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
@@ -452,8 +480,7 @@ class RTATransfertool(Transfertool):
             },
             "metadata": {},
         }
-        subject = job_subject(lane, vo, transfer.dst.rse.name)
-        return job, subject, job_message_id(request_id, attempt)
+        return job, subject, msg_id
 
     def submit(
         self,
@@ -476,11 +503,11 @@ class RTATransfertool(Transfertool):
         files = list(transfers)
         if len(files) != 1:
             raise RucioException("RTATransfertool submits one file per job")
-        job, subject, msg_id = self._build_job(files[0])
-        payload = json.dumps(job).encode("utf-8")
         limit = None if timeout is None else float(timeout)
-        self.logger(logging.INFO, "Publishing RTA job %s on %s", job["transfer_id"], subject)
         try:
+            job, subject, msg_id = self._build_job(files[0])
+            payload = json.dumps(job).encode("utf-8")
+            self.logger(logging.INFO, "Publishing RTA job %s on %s", job["transfer_id"], subject)
             ack = self._bus_or_default().publish_job(subject, payload, msg_id, timeout=limit)
         except RTATimeoutError as error:
             raise TransferToolTimeout(error) from error
@@ -498,14 +525,22 @@ class RTATransfertool(Transfertool):
         """
         Read ``rta_state`` for each transfer id.
 
-        A missing key is lost (``None``), which the poller times out. A stored
-        value means the job is still known, so the request stays ``SUBMITTED``.
+        The agent writes ``rta_state`` only after it claims the job. A missing
+        key usually means the message is still waiting on ``RTA_JOBS``. The
+        bus helper has no cheap way to ask whether that message is still in
+        the stream, so a missing key is treated the same as a stored
+        non-terminal value: ``{}``. The poller leaves ``{}`` as ``SUBMITTED``.
+        Returning ``None`` would call ``mark_transfer_lost`` on the first poll,
+        and the finisher would resubmit a new id while the original job is
+        still queued.
+
         Terminal ``DONE`` / ``FAILED`` / ``CANCELED`` updates arrive on the
-        results stream, not through this poll.
+        results stream, not through this poll. ``CANCELED`` must not be mapped
+        to ``FAILED`` here.
 
         :param requests_by_eid: ``{external_id: {request_id: request}}``.
         :param timeout: Seconds to wait for each KV read.
-        :returns: ``None`` when the key is absent, ``{}`` when it is present,
+        :returns: ``{}`` when the key is absent or holds a non-terminal object,
             or the exception when the read fails.
         """
         limit = None if timeout is None else float(timeout)
@@ -518,7 +553,7 @@ class RTATransfertool(Transfertool):
                 responses[transfer_id] = error
                 continue
             if payload is None:
-                responses[transfer_id] = None
+                responses[transfer_id] = {}
                 continue
             try:
                 document = json.loads(payload)
